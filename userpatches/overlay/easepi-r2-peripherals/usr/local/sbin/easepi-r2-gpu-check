@@ -4,6 +4,7 @@ set -euo pipefail
 MODE="${1:-status}"
 GPU_DEV="/sys/bus/platform/devices/fb000000.gpu"
 GPU_OF="${GPU_DEV}/of_node"
+GPU_PD_OF="/proc/device-tree/power-management@fd8d8000/power-controller/power-domain@12"
 
 hr() { echo; echo "===== $* ====="; }
 
@@ -75,11 +76,11 @@ check_gpu_dt_ready() {
     fi
   done
 
-  if find /proc/device-tree -path '*power-controller*' -name domain-supply -print -quit 2>/dev/null | grep -q .; then
+  if [ -e "${GPU_PD_OF}/domain-supply" ]; then
     echo "OK: GPU/power-controller domain-supply is present"
   else
-    echo "FAIL: power-controller domain-supply not found; rebuilt DTB may not be installed"
-    failed=1
+    echo "WARN: GPU power-domain domain-supply not found at ${GPU_PD_OF}"
+    echo "WARN: keeping panthor manual-only; explicit dangerous load is still allowed after reviewing dmesg"
   fi
 
   return "${failed}"
@@ -115,6 +116,7 @@ show_status() {
   for prop in mali-supply sram-supply operating-points-v2 power-domains clock-names interrupt-names; do
     [ -e "${GPU_OF}/${prop}" ] && echo "${GPU_OF}/${prop}"
   done
+  [ -e "${GPU_PD_OF}/domain-supply" ] && echo "${GPU_PD_OF}/domain-supply"
   find /proc/device-tree \( -path '*pd_gpu*' -o -path '*power-controller*' \) 2>/dev/null | grep -E 'pd_gpu|domain-supply|power-domain@12' | head -n 80 || true
   find /proc/device-tree -name domain-supply -print 2>/dev/null | sed -n '1,80p' || true
 

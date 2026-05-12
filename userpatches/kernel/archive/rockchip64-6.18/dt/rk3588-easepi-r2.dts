@@ -826,6 +826,15 @@
 	domain-supply = <&vdd_gpu_s0>;
 };
 
+&{/power-management@fd8d8000/power-controller/power-domain@12} {
+	/*
+	 * Keep a path-based override as well as &pd_gpu. Some downstream
+	 * RK3588 trees keep the label private while the runtime node path is
+	 * stable and visible in dmesg as power-domain@12.
+	 */
+	domain-supply = <&vdd_gpu_s0>;
+};
+
 &hdmi0 {
 	frl-enable-gpios = <&gpio4 RK_PB1 GPIO_ACTIVE_HIGH>;
 	status = "okay";

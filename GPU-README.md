@@ -24,7 +24,15 @@ mali-supply = <&vdd_gpu_s0>;
 sram-supply = <&vdd_gpu_mem_s0>;
 ```
 
-4. 保留手动安全调试模式：
+4. GPU power-domain 同时使用 `&pd_gpu` 和运行时路径覆盖：
+
+```dts
+&{/power-management@fd8d8000/power-controller/power-domain@12} {
+    domain-supply = <&vdd_gpu_s0>;
+};
+```
+
+5. 保留手动安全调试模式：
 
 - `blacklist panthor`：避免 udev/modalias 在开机时自动加载。
 - `blacklist panfrost`：避免旧 Mali 驱动方向干扰。
@@ -45,7 +53,7 @@ easepi-r2-gpu-check guard
 easepi-r2-gpu-check
 ```
 
-只有 `guard` 全部通过，才考虑手动加载 panthor。建议连接串口或保留可恢复入口后执行：
+`guard` 的 `FAIL` 项必须先修掉；`domain-supply` 如果只显示 `WARN`，说明 GPU 节点本身已满足 panthor 的关键属性，但 power-domain 供电提示仍需结合 dmesg 判断。建议连接串口或保留可恢复入口后执行：
 
 ```bash
 EASEPI_R2_GPU_DANGEROUS_LOAD=yes easepi-r2-gpu-check load
