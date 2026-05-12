@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Align EasePi-R2 physical port order to kernel interface names without relying
+# on systemd-networkd/NetworkManager.  It reads /proc/device-tree/eth_order and
+# performs a two-stage rename to avoid eth1 <-> eth2 "File exists" conflicts.
+set -u
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+DEFAULT_ORDER="0004:41:00.0,0002:21:00.0,0001:11:00.0,0003:31:00.0"
+TMP_PREFIX="r2tmp"
+LOG_TAG="easepi-r2-eth-order"
+
+log() {
+  echo "[$LOG_TAG] $*"
+  command -v logger >/dev/null 2>&1 && logger -t "$LOG_TAG" -- "$*" || true
+}
+
+read_order() {
+  local order=""
+  if [ -r /proc/device-tree/eth_order ]; then
+    order="$(tr -d '\000' < /proc/device-tree/eth_order 2>/dev/null | tr -d '[:space:]')"
+  fi
+  [ -n "$order" ] || order="$DEFAULT_ORDER"
+  printf '%s\n' "$order"
+}
+
+iface_for_bdf() {
+  local bdf="$1" p i dev
+  for p in /sys/class/net/*; do
+    [ -e "$p" ] || continue
+    i="${p##*/}"
+    [ "$i" = "lo" ] && continue
+    dev="$(readlink -f "$p/device" 2>/dev/null || true)"
+    case "$dev" in
+      *"/$bdf") printf '%s\n' "$i"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+iface_exists() {
+  [ -e "/sys/class/net/$1" ]
+}
+
+rename_iface() {
+  local old="$1" new="$2"
+  [ -n "$old" ] && [ -n "$new" ] || return 1
+  [ "$old" = "$new" ] && return 0
+  iface_exists "$old" || { log "skip: $old not found while renaming to $new"; return 1; }
+
+  log "rename $old -> $new"
+  ip link set dev "$old" down 2>/dev/null || true
+  ip link set dev "$old" name "$new"
+}
+
+main() {
+  if ! command -v ip >/dev/null 2>&1; then
+    log "ip command not found; cannot align port names"
+    exit 0
+  fi
+
+  local order bdfs_csv i bdf cur target tmp all_ok=1
+  order="$(read_order)"
+  log "eth_order=$order"
+
+  IFS=',' read -r -a bdfs_csv <<< "$order"
+  if [ "${#bdfs_csv[@]}" -lt 4 ]; then
+    log "eth_order has less than 4 entries; fallback to $DEFAULT_ORDER"
+    IFS=',' read -r -a bdfs_csv <<< "$DEFAULT_ORDER"
+  fi
+
+  # Quick path: already correct.
+  for i in 0 1 2 3; do
+    bdf="${bdfs_csv[$i]}"
+    target="eth$i"
+    cur="$(iface_for_bdf "$bdf" || true)"
+    if [ "$cur" != "$target" ]; then
+      all_ok=0
+    fi
+  done
+  if [ "$all_ok" = "1" ]; then
+    log "port order already aligned; nothing to do"
+    exit 0
+  fi
+
+  # Stage 1: move every present target device to a unique temporary name.
+  # This avoids direct eth1 <-> eth2 rename conflicts.
+  for i in 0 1 2 3; do
+    bdf="${bdfs_csv[$i]}"
+    tmp="${TMP_PREFIX}${i}"
+    cur="$(iface_for_bdf "$bdf" || true)"
+    if [ -z "$cur" ]; then
+      log "missing device for $bdf; skip temporary rename for eth$i"
+      continue
+    fi
+    if [ "$cur" != "$tmp" ]; then
+      if iface_exists "$tmp"; then
+        # Stale temporary name from an interrupted/manual run. If it is not this
+        # BDF, move it away so the current device can use the temporary slot.
+        local tmp_bdf
+        tmp_bdf="$(readlink -f "/sys/class/net/$tmp/device" 2>/dev/null | sed -n 's#.*/\([0-9a-fA-F]\{4\}:[0-9a-fA-F]\{2\}:[0-9a-fA-F]\{2\}\.[0-7]\)$#\1#p')"
+        if [ "$tmp_bdf" != "$bdf" ]; then
+          rename_iface "$tmp" "${TMP_PREFIX}x${i}" || true
+        fi
+      fi
+      rename_iface "$cur" "$tmp" || log "temporary rename failed for $bdf ($cur -> $tmp)"
+    fi
+  done
+
+  # Stage 2: move temporary names to final eth0-eth3.
+  for i in 0 1 2 3; do
+    bdf="${bdfs_csv[$i]}"
+    target="eth$i"
+    cur="$(iface_for_bdf "$bdf" || true)"
+    if [ -z "$cur" ]; then
+      log "missing device for $bdf; final $target not created"
+      continue
+    fi
+    if [ "$cur" != "$target" ]; then
+      if iface_exists "$target"; then
+        log "target $target still exists before final rename; move it aside"
+        rename_iface "$target" "${TMP_PREFIX}hold${i}" || true
+      fi
+      rename_iface "$cur" "$target" || log "final rename failed for $bdf ($cur -> $target)"
+    fi
+  done
+
+  # Final report.
+  for i in 0 1 2 3; do
+    if iface_exists "eth$i"; then
+      log "eth$i -> $(readlink -f "/sys/class/net/eth$i/device" 2>/dev/null || echo unknown)"
+    else
+      log "eth$i missing after alignment"
+    fi
+  done
+}
+
+main "$@"

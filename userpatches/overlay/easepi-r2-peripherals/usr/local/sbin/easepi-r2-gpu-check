@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODE="${1:-status}"
+
+hr() { echo; echo "===== $* ====="; }
+
+show_status() {
+  hr "kernel / modules"
+  uname -a
+  lsmod | grep -Ei 'panthor|panfrost|mali|drm' || true
+
+  hr "GPU DT compatible"
+  if [ -e /sys/bus/platform/devices/fb000000.gpu/of_node/compatible ]; then
+    tr '\0' '\n' < /sys/bus/platform/devices/fb000000.gpu/of_node/compatible
+  else
+    echo "fb000000.gpu compatible not found"
+  fi
+
+  hr "GPU DT status"
+  if [ -e /sys/bus/platform/devices/fb000000.gpu/of_node/status ]; then
+    tr '\0' '\n' < /sys/bus/platform/devices/fb000000.gpu/of_node/status
+  else
+    echo "no status property"
+  fi
+
+  hr "GPU modalias / driver"
+  cat /sys/bus/platform/devices/fb000000.gpu/modalias 2>/dev/null || true
+  readlink -f /sys/bus/platform/devices/fb000000.gpu/driver 2>/dev/null || echo "fb000000.gpu has no bound driver"
+
+  hr "GPU power-domain supply hints"
+  find /proc/device-tree -path '*pd_gpu*' -o -path '*power-controller*' 2>/dev/null | grep -E 'pd_gpu|domain-supply' | head -n 80 || true
+  find /proc/device-tree -name domain-supply -print 2>/dev/null | sed -n '1,80p' || true
+
+  hr "panthor modinfo"
+  modinfo panthor 2>/dev/null | grep -E '^filename|^description|^alias' || echo "panthor module not found"
+
+  hr "auto-load policy"
+  grep -RIn 'panthor\|panfrost' /etc/modules-load.d /etc/modprobe.d 2>/dev/null || true
+
+  hr "/dev/dri"
+  ls -l /dev/dri 2>/dev/null || echo "/dev/dri not found"
+
+  hr "dmesg hints"
+  dmesg | grep -Ei 'panthor|panfrost|mali|gpu|fb000000|drm|opp|clock|clk|regulator|power|pm-domain|vdd_gpu|iommu|firmware|renderD' | tail -n 160 || true
+
+  hr "quick result"
+  if ls /dev/dri/renderD* >/dev/null 2>&1 && lsmod | grep -q '^panthor'; then
+    echo "OK: panthor loaded and /dev/dri/renderD* exists. Mali-G610 3D entry is ready."
+  else
+    echo "WARN: render node is not ready. Current package is safety-debug mode; panthor is not auto-loaded at boot."
+  fi
+}
+
+load_panthor() {
+  hr "manual panthor load test"
+  echo "This will run: modprobe panthor"
+  echo "If the board freezes or HDMI stops here, power-cycle/reboot; auto-load is blacklisted, so next boot should recover."
+  echo
+  modprobe panthor || true
+  sleep 2
+  show_status
+}
+
+unload_panthor() {
+  hr "unload panthor"
+  modprobe -r panthor 2>/dev/null || true
+  sleep 1
+  show_status
+}
+
+enable_auto() {
+  hr "enable panthor auto-load"
+  rm -f /etc/modprobe.d/99-easepi-r2-panthor-manual-only.conf
+  mkdir -p /etc/modules-load.d
+  cat > /etc/modules-load.d/easepi-r2-gpu.conf <<'EOC'
+# EasePi-R2 / RK3588 Mali-G610 mainline GPU driver
+panthor
+EOC
+  echo "Enabled. Reboot to test automatic panthor loading."
+}
+
+disable_auto() {
+  hr "disable panthor auto-load"
+  rm -f /etc/modules-load.d/easepi-r2-gpu.conf
+  mkdir -p /etc/modprobe.d
+  cat > /etc/modprobe.d/99-easepi-r2-panthor-manual-only.conf <<'EOC'
+# Safety debug mode: prevent panthor from being auto-loaded by udev/modalias at boot.
+# Explicit manual test still works with: modprobe panthor
+blacklist panthor
+EOC
+  echo "Disabled. Reboot to verify the system starts without panthor auto-loading."
+}
+
+case "$MODE" in
+  status|check)
+    show_status
+    ;;
+  load|test|modprobe)
+    load_panthor
+    ;;
+  unload|remove)
+    unload_panthor
+    ;;
+  enable-auto)
+    enable_auto
+    ;;
+  disable-auto)
+    disable_auto
+    ;;
+  logs)
+    dmesg | grep -Ei 'panthor|panfrost|mali|gpu|fb000000|drm|opp|clock|clk|regulator|power|pm-domain|vdd_gpu|iommu|firmware|renderD' | tail -n 240 || true
+    ;;
+  *)
+    cat <<USAGE
+Usage:
+  easepi-r2-gpu-check status       # show GPU status, default
+  easepi-r2-gpu-check load         # manually modprobe panthor and show result
+  easepi-r2-gpu-check unload       # unload panthor if possible
+  easepi-r2-gpu-check logs         # show GPU-related dmesg
+  easepi-r2-gpu-check enable-auto  # remove panthor blacklist and auto-load at boot
+  easepi-r2-gpu-check disable-auto # restore safe manual-only mode
+USAGE
+    exit 1
+    ;;
+esac

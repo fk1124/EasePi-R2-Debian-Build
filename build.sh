@@ -1,0 +1,464 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+BUILD_DIR="${ARMBIAN_BUILD_DIR:-${REPO_DIR}/../build}"
+
+BOARD="${BOARD:-easepi-r2}"
+BRANCH="${1:-current}"
+RELEASE="${2:-trixie}"
+IMAGE_TYPE="${3:-minimal}"
+
+case "${BRANCH}" in
+    current|edge|vendor) ;;
+    *)
+        echo "ERROR: unsupported BRANCH: ${BRANCH}"
+        echo "Usage: bash build.sh [current|edge|vendor] [trixie|bookworm] [minimal|server|desktop]"
+        exit 1
+        ;;
+esac
+
+case "${RELEASE}" in
+    trixie|bookworm) ;;
+    *)
+        echo "ERROR: unsupported RELEASE: ${RELEASE}"
+        echo "Usage: bash build.sh [current|edge|vendor] [trixie|bookworm] [minimal|server|desktop]"
+        exit 1
+        ;;
+esac
+
+case "${IMAGE_TYPE}" in
+    minimal|server|desktop) ;;
+    *)
+        echo "ERROR: unsupported IMAGE_TYPE: ${IMAGE_TYPE}"
+        echo "Usage: bash build.sh [current|edge|vendor] [trixie|bookworm] [minimal|server|desktop]"
+        exit 1
+        ;;
+esac
+
+if [ ! -f "${BUILD_DIR}/compile.sh" ]; then
+    echo "ERROR: Cannot find Armbian build directory: ${BUILD_DIR}"
+    echo
+    echo "Expected structure:"
+    echo "  ~/rk3588_build/"
+    echo "  ├── build/"
+    echo "  └── EasePi-R2-Debian-Build/"
+    echo
+    echo "Or specify manually:"
+    echo "  ARMBIAN_BUILD_DIR=/path/to/build bash build.sh current trixie minimal"
+    exit 1
+fi
+
+# ============================================================
+# 默认构建策略
+# ============================================================
+#
+# 关键点：
+# 1. REGIONAL_MIRROR 默认留空，不再默认 china。
+#    你的环境直连 GitHub / ghcr.io 反而更快。
+#
+# 2. MAINLINE_MIRROR 默认 auto，优先 google，再 tuna，再 bfsu。
+#
+# 3. UBOOT_MIRROR 默认 auto，优先 github，避免 gitee 要用户名。
+#
+# 4. GITHUB_SOURCE 默认 auto，优先 github.com。
+#
+# 5. GITHUB_MIRROR 默认留空，避免 gitclone / 代理源导致 GitHub Release 下载异常。
+#
+# 6. KERNEL_GIT 默认 shallow，避免 full 拉 3GB+。
+#
+# 7. CPUTHREADS 尊重外部传入，不再强制覆盖。
+#
+# 手动示例：
+#   CPUTHREADS=8 bash build.sh current trixie minimal
+#   MAINLINE_MIRROR=google bash build.sh current trixie minimal
+#   REGIONAL_MIRROR=china bash build.sh current trixie minimal
+
+REGIONAL_MIRROR="${REGIONAL_MIRROR-}"
+MAINLINE_MIRROR="${MAINLINE_MIRROR:-auto}"
+UBOOT_MIRROR="${UBOOT_MIRROR:-auto}"
+GITHUB_SOURCE="${GITHUB_SOURCE:-auto}"
+GITHUB_MIRROR="${GITHUB_MIRROR-}"
+KERNEL_GIT="${KERNEL_GIT:-shallow}"
+CPUTHREADS="${CPUTHREADS:-$(nproc)}"
+
+ORAS_PREFETCH="${ORAS_PREFETCH:-yes}"
+ORAS_VERSION="${ORAS_VERSION:-1.3.1}"
+
+msg() {
+    printf '%s\n' "$*"
+}
+
+probe_git() {
+    local name="$1"
+    local url="$2"
+    local ref="${3:-HEAD}"
+    local timeout_sec="${4:-15}"
+
+    printf 'Probe git %-20s : %s ... ' "${name}" "${url}"
+
+    if timeout "${timeout_sec}" git ls-remote --exit-code "${url}" "${ref}" >/dev/null 2>&1; then
+        printf 'OK\n'
+        return 0
+    fi
+
+    printf 'FAIL\n'
+    return 1
+}
+
+probe_url() {
+    local name="$1"
+    local url="$2"
+    local timeout_sec="${3:-15}"
+
+    printf 'Probe url %-20s : %s ... ' "${name}" "${url}"
+
+    if timeout "${timeout_sec}" curl -fsIL --connect-timeout 8 --max-time "${timeout_sec}" "${url}" >/dev/null 2>&1; then
+        printf 'OK\n'
+        return 0
+    fi
+
+    printf 'FAIL\n'
+    return 1
+}
+
+choose_mainline_mirror() {
+    if [ "${BRANCH}" = "vendor" ]; then
+        MAINLINE_MIRROR=""
+        return 0
+    fi
+
+    if [ "${MAINLINE_MIRROR}" != "auto" ]; then
+        return 0
+    fi
+
+    msg
+    msg "Auto selecting mainline kernel mirror..."
+
+    if probe_git "linux Google" "https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux-stable.git" "HEAD" 15; then
+        MAINLINE_MIRROR="google"
+        return 0
+    fi
+
+    if probe_git "linux TUNA" "https://mirrors.tuna.tsinghua.edu.cn/git/linux-stable.git" "HEAD" 15; then
+        MAINLINE_MIRROR="tuna"
+        return 0
+    fi
+
+    if probe_git "linux BFSU" "https://mirrors.bfsu.edu.cn/git/linux-stable.git" "HEAD" 15; then
+        MAINLINE_MIRROR="bfsu"
+        return 0
+    fi
+
+    msg "WARN: Google/TUNA/BFSU unavailable, using Armbian default mainline source."
+    MAINLINE_MIRROR=""
+}
+
+choose_uboot_mirror() {
+    if [ "${BRANCH}" = "vendor" ]; then
+        if [ "${UBOOT_MIRROR}" = "auto" ]; then
+            UBOOT_MIRROR=""
+        fi
+        return 0
+    fi
+
+    if [ "${UBOOT_MIRROR}" != "auto" ]; then
+        return 0
+    fi
+
+    msg
+    msg "Auto selecting U-Boot mirror..."
+
+    if probe_git "u-boot GitHub" "https://github.com/u-boot/u-boot.git" "HEAD" 15; then
+        UBOOT_MIRROR="github"
+        return 0
+    fi
+
+    if probe_git "u-boot Gitee" "https://gitee.com/mirrors/u-boot.git" "HEAD" 15; then
+        UBOOT_MIRROR="gitee"
+        return 0
+    fi
+
+    msg "WARN: both GitHub and Gitee U-Boot probes failed, fallback to github."
+    UBOOT_MIRROR="github"
+}
+
+choose_github_source() {
+    if [ "${GITHUB_SOURCE}" != "auto" ]; then
+        return 0
+    fi
+
+    local oras_file="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+    local direct_url="https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${oras_file}"
+    local ghfast_url="https://ghfast.top/https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${oras_file}"
+
+    msg
+    msg "Auto selecting GitHub release source..."
+
+    if probe_url "GitHub direct" "${direct_url}" 15; then
+        GITHUB_SOURCE="https://github.com"
+        return 0
+    fi
+
+    if probe_url "GitHub ghfast" "${ghfast_url}" 15; then
+        GITHUB_SOURCE="https://ghfast.top/https://github.com"
+        return 0
+    fi
+
+    msg "WARN: GitHub release probe failed, fallback to https://github.com."
+    GITHUB_SOURCE="https://github.com"
+}
+
+prepare_kernel_configs() {
+    mkdir -p "${REPO_DIR}/userpatches"
+
+    local cfg src dst found
+    local configs=(
+        "linux-rockchip64-current.config"
+        "linux-rockchip64-edge.config"
+        "linux-rk35xx-vendor.config"
+    )
+
+    for cfg in "${configs[@]}"; do
+        src="${BUILD_DIR}/config/kernel/${cfg}"
+        dst="${REPO_DIR}/userpatches/${cfg}"
+        found=""
+
+        if [ -f "${src}" ]; then
+            found="${src}"
+        else
+            found="$(find "${BUILD_DIR}/config" -type f -name "${cfg}" 2>/dev/null | head -1 || true)"
+        fi
+
+        if [ -n "${found}" ] && [ -f "${found}" ]; then
+            cp -f "${found}" "${dst}"
+        elif [ -f "${dst}" ]; then
+            msg "WARN: default kernel config not found, patch existing user config: ${dst}"
+        else
+            msg "WARN: default kernel config not found and user config missing: ${cfg}"
+            continue
+        fi
+
+        # 关闭 WERROR，避免 warning 被当成 error 导致编译中断。
+        sed -i \
+            -e 's/^CONFIG_WERROR=y/# CONFIG_WERROR is not set/' \
+            -e 's/^CONFIG_WERROR=.*/# CONFIG_WERROR is not set/' \
+            "${dst}"
+
+        grep -q '^# CONFIG_WERROR is not set' "${dst}" || \
+            echo '# CONFIG_WERROR is not set' >> "${dst}"
+
+        # 禁用 panel-simple-dsi。
+        # 这是 MIPI DSI 小屏驱动，不是 HDMI。EasePi-R2 常规 HDMI 输出不依赖它。
+        sed -i \
+            -e 's/^CONFIG_DRM_PANEL_SIMPLE_DSI=y/# CONFIG_DRM_PANEL_SIMPLE_DSI is not set/' \
+            -e 's/^CONFIG_DRM_PANEL_SIMPLE_DSI=m/# CONFIG_DRM_PANEL_SIMPLE_DSI is not set/' \
+            -e 's/^CONFIG_DRM_PANEL_SIMPLE_DSI=.*/# CONFIG_DRM_PANEL_SIMPLE_DSI is not set/' \
+            "${dst}"
+
+        grep -q '^# CONFIG_DRM_PANEL_SIMPLE_DSI is not set' "${dst}" || \
+            echo '# CONFIG_DRM_PANEL_SIMPLE_DSI is not set' >> "${dst}"
+
+        msg "Prepared kernel config: ${dst}"
+    done
+}
+
+prefetch_oras_tooling() {
+    if [ "${ORAS_PREFETCH}" != "yes" ]; then
+        msg "ORAS prefetch disabled."
+        return 0
+    fi
+
+    local uname_s uname_m oras_os oras_arch oras_version oras_dir oras_fn oras_bin oras_url tmp_dir
+
+    uname_s="$(uname -s)"
+    uname_m="$(uname -m)"
+    oras_version="${ORAS_VERSION}"
+
+    case "${uname_s}" in
+        Linux|linux)
+            oras_os="linux"
+            ;;
+        Darwin|darwin)
+            oras_os="darwin"
+            ;;
+        *)
+            msg "WARN: unsupported host OS for ORAS prefetch: ${uname_s}"
+            return 0
+            ;;
+    esac
+
+    case "${uname_m}" in
+        x86_64|amd64)
+            oras_arch="amd64"
+            ;;
+        aarch64|arm64)
+            oras_arch="arm64"
+            ;;
+        riscv64)
+            oras_arch="riscv64"
+            oras_version="1.2.0-beta.1"
+            ;;
+        *)
+            msg "WARN: unsupported host arch for ORAS prefetch: ${uname_m}"
+            return 0
+            ;;
+    esac
+
+    oras_dir="${BUILD_DIR}/cache/tools/oras"
+    oras_fn="oras_${oras_version}_${oras_os}_${oras_arch}"
+    oras_bin="${oras_dir}/${oras_fn}"
+    oras_url="${GITHUB_SOURCE%/}/oras-project/oras/releases/download/v${oras_version}/${oras_fn}.tar.gz"
+
+    mkdir -p "${oras_dir}"
+
+    if [ -x "${oras_bin}" ]; then
+        msg "Using cached ORAS tooling: ${oras_bin}"
+        return 0
+    fi
+
+    msg
+    msg "Prefetch ORAS tooling:"
+    msg "  URL : ${oras_url}"
+    msg "  SAVE: ${oras_bin}"
+
+    tmp_dir="$(mktemp -d)"
+
+    if ! curl -fL --retry 3 --retry-delay 3 --connect-timeout 20 \
+        -o "${tmp_dir}/oras.tar.gz" \
+        "${oras_url}"; then
+        rm -rf "${tmp_dir}"
+        msg "WARN: failed to prefetch ORAS tooling, continue with Armbian default behavior."
+        return 0
+    fi
+
+    tar -xf "${tmp_dir}/oras.tar.gz" -C "${tmp_dir}" oras
+    mv "${tmp_dir}/oras" "${oras_bin}"
+    chmod +x "${oras_bin}"
+
+    "${oras_bin}" version || true
+
+    rm -rf "${tmp_dir}"
+}
+
+choose_mainline_mirror
+choose_uboot_mirror
+choose_github_source
+prepare_kernel_configs
+
+printf '============================================\n'
+printf '  EasePi-R2 Armbian Firmware Build\n'
+printf '============================================\n'
+printf 'Build directory : %s\n' "${BUILD_DIR}"
+printf 'Board           : %s\n' "${BOARD}"
+printf 'Branch          : %s\n' "${BRANCH}"
+printf 'Release         : %s\n' "${RELEASE}"
+printf 'Image type      : %s\n' "${IMAGE_TYPE}"
+printf 'Kernel git      : %s\n' "${KERNEL_GIT}"
+printf 'Regional mirror : %s\n' "${REGIONAL_MIRROR:-none}"
+printf 'Mainline mirror : %s\n' "${MAINLINE_MIRROR:-default}"
+printf 'U-Boot mirror   : %s\n' "${UBOOT_MIRROR:-default}"
+printf 'GitHub mirror   : %s\n' "${GITHUB_MIRROR:-direct}"
+printf 'GitHub source   : %s\n' "${GITHUB_SOURCE}"
+printf 'Threads         : %s\n' "${CPUTHREADS}"
+printf '============================================\n'
+
+rsync -a "${REPO_DIR}/userpatches/" "${BUILD_DIR}/userpatches/"
+
+cd "${BUILD_DIR}"
+
+export PESTER_TERMINAL=no
+export WT_SESSION=1
+export ALLOW_ROOT=yes
+export GIT_TERMINAL_PROMPT=0
+export SKIP_ORAS=yes
+
+git config --global core.askPass '' 2>/dev/null || true
+git config --global credential.helper '' 2>/dev/null || true
+
+prefetch_oras_tooling
+
+BUILD_DESKTOP="no"
+BUILD_MINIMAL="no"
+
+case "${IMAGE_TYPE}" in
+    minimal)
+        BUILD_DESKTOP="no"
+        BUILD_MINIMAL="yes"
+        ;;
+    server)
+        BUILD_DESKTOP="no"
+        BUILD_MINIMAL="no"
+        ;;
+    desktop)
+        BUILD_DESKTOP="yes"
+        BUILD_MINIMAL="no"
+        ;;
+esac
+
+COMPILE_ARGS=(
+    "BOARD=${BOARD}"
+    "BRANCH=${BRANCH}"
+    "RELEASE=${RELEASE}"
+    "BUILD_DESKTOP=${BUILD_DESKTOP}"
+    "BUILD_MINIMAL=${BUILD_MINIMAL}"
+    "KERNEL_CONFIGURE=no"
+    "KERNEL_GIT=${KERNEL_GIT}"
+    "SKIP_ORAS=yes"
+    "USE_CCACHE=yes"
+    "CPUTHREADS=${CPUTHREADS}"
+    "GITHUB_SOURCE=${GITHUB_SOURCE}"
+    "GITHUB_MIRROR=${GITHUB_MIRROR}"
+    "ORAS_VERSION=${ORAS_VERSION}"
+)
+
+if [ -n "${REGIONAL_MIRROR}" ]; then
+    COMPILE_ARGS+=("REGIONAL_MIRROR=${REGIONAL_MIRROR}")
+fi
+
+if [ -n "${MAINLINE_MIRROR}" ]; then
+    COMPILE_ARGS+=("MAINLINE_MIRROR=${MAINLINE_MIRROR}")
+fi
+
+if [ -n "${UBOOT_MIRROR}" ]; then
+    COMPILE_ARGS+=("UBOOT_MIRROR=${UBOOT_MIRROR}")
+fi
+
+if [ "${IMAGE_TYPE}" = "desktop" ]; then
+    COMPILE_ARGS+=(
+        "DESKTOP_ENVIRONMENT=xfce"
+        "DESKTOP_ENVIRONMENT_CONFIG_NAME=config_base"
+        "DESKTOP_APPGROUPS_SELECTED=browsers,desktop_tools,editors,internet,multimedia,remote_desktop"
+    )
+fi
+
+printf '\nStarting build...\n\n'
+
+set +e
+set +o pipefail
+yes "" | ./compile.sh "${COMPILE_ARGS[@]}"
+BUILD_EXIT="${PIPESTATUS[1]}"
+set -o pipefail
+set -e
+
+if [ "${BUILD_EXIT}" -ne 0 ]; then
+    echo
+    echo "ERROR: Armbian build failed with exit code ${BUILD_EXIT}."
+    echo
+    echo "Recent logs:"
+    ls -lt output/logs/*.log 2>/dev/null | head -5 || true
+    echo
+    echo "Quick error grep:"
+    LOG="$(ls -t output/logs/log-build-*.log 2>/dev/null | head -1 || true)"
+    if [ -n "${LOG}" ] && [ -f "${LOG}" ]; then
+        grep -n -B5 -A15 -Ei \
+            'error:|fatal error:|cc1: all warnings|Error [0-9]|No rule to make target|Killed' \
+            "${LOG}" | tail -n 160 || true
+    fi
+    exit "${BUILD_EXIT}"
+fi
+
+echo
+echo "Build finished."
+echo "Images:"
+ls -lh output/images 2>/dev/null || true
