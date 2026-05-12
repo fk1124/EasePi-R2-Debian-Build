@@ -266,6 +266,15 @@ clean_broken_cache() {
     # rm -rf cache/memoize/git2info/*
 }
 
+calc_bsp_input_hash() {
+    (
+        cd "${REPO_DIR}"
+        find userpatches -type f -print0 2>/dev/null | sort -z | while IFS= read -r -d '' f; do
+            sha256sum "$f"
+        done
+    ) | sha256sum | awk '{print $1}'
+}
+
 prepare_kernel_configs() {
     mkdir -p "${REPO_DIR}/userpatches"
 
@@ -334,12 +343,25 @@ if [ ! -f "${BUILD_DIR}/compile.sh" ]; then
     exit 1
 fi
 
+prepare_kernel_configs
+BSP_INPUT_HASH="$(calc_bsp_input_hash)"
+BSP_STAMP="${BSP_DIR}/.bsp-input-hash"
+
+if [ "${FORCE_BSP_REBUILD}" != "yes" ] && \
+   ls "${BSP_DIR}"/linux-image-*.deb >/dev/null 2>&1 && \
+   ls "${BSP_DIR}"/linux-dtb-*.deb >/dev/null 2>&1 && \
+   ls "${BSP_DIR}"/*u-boot*.deb >/dev/null 2>&1 && \
+   [ -f "${BSP_STAMP}" ] && \
+   [ "$(cat "${BSP_STAMP}")" = "${BSP_INPUT_HASH}" ]; then
+    msg "Using cached BSP debs: ${BSP_DIR}"
+    exit 0
+fi
+
 if [ "${FORCE_BSP_REBUILD}" != "yes" ] && \
    ls "${BSP_DIR}"/linux-image-*.deb >/dev/null 2>&1 && \
    ls "${BSP_DIR}"/linux-dtb-*.deb >/dev/null 2>&1 && \
    ls "${BSP_DIR}"/*u-boot*.deb >/dev/null 2>&1; then
-    msg "Using cached BSP debs: ${BSP_DIR}"
-    exit 0
+    msg "BSP cache exists but input hash changed or stamp is missing; rebuilding BSP."
 fi
 
 choose_mainline_mirror
@@ -358,8 +380,6 @@ printf 'U-Boot mirror   : %s\n' "${UBOOT_MIRROR}"
 printf 'GitHub mirror   : %s\n' "${GITHUB_MIRROR:-direct}"
 printf 'GitHub source   : %s\n' "${GITHUB_SOURCE}"
 printf 'Threads         : %s\n' "${CPUTHREADS}"
-
-prepare_kernel_configs
 
 rsync -a "${REPO_DIR}/userpatches/" "${BUILD_DIR}/userpatches/"
 
@@ -464,6 +484,7 @@ fi
 rm -rf "${BSP_DIR:?}"/*
 cp -a "${TMP_BSP_DIR}/." "${BSP_DIR}/"
 rm -rf "${TMP_BSP_DIR}"
+printf '%s\n' "${BSP_INPUT_HASH}" > "${BSP_STAMP}"
 
 printf '\nBSP debs saved to: %s\n' "${BSP_DIR}"
 ls -lh "${BSP_DIR}" | sed 's/^/  /'

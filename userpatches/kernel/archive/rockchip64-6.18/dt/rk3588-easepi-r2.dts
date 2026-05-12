@@ -811,13 +811,12 @@
 // display
 &gpu {
 	/*
-	 * Use the mainline RK3588 GPU OPP table and keep the board-level
-	 * GPU regulators here. Panthor currently parses one GPU supply, so
-	 * do not use the old Rockchip dual-rail OPP table.
+	 * Board-level GPU regulators. Mainline panthor consumes "mali" through
+	 * the OPP core and enables the SRAM rail through the "sram" supply.
 	 */
 	mali-supply = <&vdd_gpu_s0>;
-	mem-supply = <&vdd_gpu_mem_s0>;
-	operating-points-v2 = <&gpu_opp_table>;
+	sram-supply = <&vdd_gpu_mem_s0>;
+	operating-points-v2 = <&gpu_opp_table_panthor>;
 	power-off-delay-ms = <200>;
 	status = "okay";
 };
