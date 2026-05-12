@@ -1,30 +1,30 @@
-# EasePi-R2 GPU / Panthor 安全调试版
+# EasePi-R2 GPU / Panthor 自动加载版
 
-本版默认不自动加载 panthor。RK3588 Mali-G610 的主线方向是 panthor，但如果 DTB 里的 GPU 时钟、IRQ、供电或 power-domain 描述不对，`modprobe panthor` 可能导致 SSH 和 HDMI 同时卡死。
+当前版本默认在开机时加载 RK3588 Mali-G610 的主线 panthor 驱动。
 
-## 本版修正
+## 已确认的 DTB 修正
 
-1. GPU compatible 使用当前主线 panthor 可匹配的写法：
+GPU compatible：
 
 ```dts
 compatible = "rockchip,rk3588-mali", "arm,mali-valhall-csf";
 ```
 
-2. GPU 时钟名、IRQ 名改回 panthor 驱动实际读取的名字：
+panthor 使用的时钟名和 IRQ 名：
 
 ```dts
 clock-names = "core", "coregroup", "stacks";
 interrupt-names = "job", "mmu", "gpu";
 ```
 
-3. GPU 供电使用 panthor 当前约定：
+GPU 供电：
 
 ```dts
 mali-supply = <&vdd_gpu_s0>;
 sram-supply = <&vdd_gpu_mem_s0>;
 ```
 
-4. GPU power-domain 同时使用 `&pd_gpu` 和运行时路径覆盖：
+GPU power-domain：
 
 ```dts
 &{/power-management@fd8d8000/power-controller/power-domain@12} {
@@ -32,45 +32,57 @@ sram-supply = <&vdd_gpu_mem_s0>;
 };
 ```
 
-5. 保留手动安全调试模式：
+## 自动加载策略
 
-- `blacklist panthor`：避免 udev/modalias 在开机时自动加载。
-- `blacklist panfrost`：避免旧 Mali 驱动方向干扰。
-- `easepi-r2-gpu-check load` 现在必须显式设置确认环境变量才会执行 `modprobe panthor`。
+镜像会安装：
+
+```text
+/etc/modules-load.d/easepi-r2-gpu.conf
+```
+
+内容为：
+
+```text
+panthor
+```
+
+同时保留：
+
+```text
+/etc/modprobe.d/easepi-r2-gpu.conf
+```
+
+用于 blacklist `panfrost`，避免旧 Mali 驱动方向干扰。
+
+临时调试命令 `easepi-r2-gpu-check` 已移除。后续用综合硬件测试脚本或系统命令确认 GPU 状态。
 
 ## 构建提醒
 
-如果改过 DTS/DTB，必须让 BSP 重新编译。脚本现在会记录 BSP 输入文件 hash，避免旧 `output/bsp/current` 被误复用。需要强制重编时仍可执行：
+改过 DTS/DTB 后需要重新编译 BSP。脚本会记录 BSP 输入文件 hash，避免误复用旧 `output/bsp/current`。需要强制重编时执行：
 
 ```bash
 FORCE_BSP_REBUILD=yes bash build-bsp-image.sh debian trixie current minimal
 ```
 
-刷机后先确认 DTB 已更新：
+## 启动后验证
 
 ```bash
-easepi-r2-gpu-check guard
-easepi-r2-gpu-check
+lsmod | grep panthor
+ls -l /dev/dri
+dmesg | grep -Ei 'panthor|mali|gpu|fb000000|renderD' | tail -n 80
 ```
 
-`guard` 的 `FAIL` 项必须先修掉；`domain-supply` 如果只显示 `WARN`，说明 GPU 节点本身已满足 panthor 的关键属性，但 power-domain 供电提示仍需结合 dmesg 判断。建议连接串口或保留可恢复入口后执行：
+成功状态应包含：
 
-```bash
-EASEPI_R2_GPU_DANGEROUS_LOAD=yes easepi-r2-gpu-check load
+```text
+panthor
+/dev/dri/renderD128
+Initialized panthor 1.5.0 for fb000000.gpu
 ```
 
-如果出现 `/dev/dri/renderD128` 且系统稳定，再启用开机自动加载：
+用户态可继续检查：
 
 ```bash
-easepi-r2-gpu-check enable-auto
-reboot
-```
-
-如果加载后卡死，断电重启即可；默认黑名单仍会让下一次启动恢复到不加载 panthor 的状态。若你已经启用了自动加载，需要挂载 rootfs 后恢复：
-
-```bash
-rm -f /etc/modules-load.d/easepi-r2-gpu.conf
-cat >/etc/modprobe.d/99-easepi-r2-panthor-manual-only.conf <<'EOC'
-blacklist panthor
-EOC
+vulkaninfo --summary
+eglinfo -B 2>/dev/null || true
 ```

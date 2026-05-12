@@ -89,8 +89,9 @@ if [ -d "${REPO_DIR}/userpatches/overlay/easepi-r2-peripherals" ]; then
     # /proc/device-tree/eth_order. Remove legacy direct .link renames to avoid
     # eth1 <-> eth2 "File exists" conflicts.
     ${SUDO} rm -f "${ROOTFS_DIR}"/etc/systemd/network/10-easepi-r2-eth{0,1,2,3}.link
+    ${SUDO} rm -f "${ROOTFS_DIR}/etc/modprobe.d/99-easepi-r2-panthor-manual-only.conf"
+    ${SUDO} rm -f "${ROOTFS_DIR}/usr/local/sbin/easepi-r2-gpu-check"
     ${SUDO} chmod +x "${ROOTFS_DIR}/usr/local/sbin/easepi-r2-eth-order" 2>/dev/null || true
-    ${SUDO} chmod +x "${ROOTFS_DIR}/usr/local/sbin/easepi-r2-gpu-check" 2>/dev/null || true
 fi
 
 # Basic system identity and optional account configuration.

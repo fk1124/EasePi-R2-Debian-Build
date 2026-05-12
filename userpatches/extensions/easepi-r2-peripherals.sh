@@ -30,8 +30,9 @@ function pre_customize_image__copy_easepi_r2_peripheral_files() {
 	# eth0-eth3 are aligned by the early easepi-r2-eth-order service. Remove
 	# legacy direct .link renames that cannot safely swap eth1 and eth2.
 	rm -f "${SDCARD}"/etc/systemd/network/10-easepi-r2-eth{0,1,2,3}.link
+	rm -f "${SDCARD}/etc/modprobe.d/99-easepi-r2-panthor-manual-only.conf"
+	rm -f "${SDCARD}/usr/local/sbin/easepi-r2-gpu-check"
 	chmod +x "${SDCARD}/usr/local/sbin/easepi-r2-eth-order" 2>/dev/null || true
-	chmod +x "${SDCARD}/usr/local/sbin/easepi-r2-gpu-check" 2>/dev/null || true
 
 	if [[ -f "${SDCARD}/usr/local/sbin/bluetooth-hciattach.sh" ]]; then
 		chmod +x "${SDCARD}/usr/local/sbin/bluetooth-hciattach.sh"
