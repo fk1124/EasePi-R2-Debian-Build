@@ -435,10 +435,11 @@ fi
 printf '\nStarting build...\n\n'
 
 set +e
-set +o pipefail
-yes "" | ./compile.sh "${COMPILE_ARGS[@]}"
-BUILD_EXIT="${PIPESTATUS[1]}"
-set -o pipefail
+# Keep the Armbian build non-interactive without feeding an infinite stream into
+# every child process. Some extraction/logging pipelines inherit stdin; piping
+# `yes` into the whole build can make them wait on the wrong input forever.
+./compile.sh "${COMPILE_ARGS[@]}" </dev/null
+BUILD_EXIT="$?"
 set -e
 
 if [ "${BUILD_EXIT}" -ne 0 ]; then
