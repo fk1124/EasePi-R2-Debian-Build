@@ -50,6 +50,49 @@ msg() {
     printf '%s\n' "$*"
 }
 
+install_pv_cat_wrapper() {
+    local wrapper_dir
+    wrapper_dir="$(mktemp -d "${TMPDIR:-/tmp}/easepi-r2-pv.XXXXXX")"
+    cat > "${wrapper_dir}/pv" <<'PV_WRAPPER'
+#!/usr/bin/env bash
+set -e
+
+files=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --)
+            shift
+            while [ "$#" -gt 0 ]; do
+                files+=("$1")
+                shift
+            done
+            ;;
+        -N|--name|-s|--size|-i|--interval|-w|--width|-H|--height|-L|--rate-limit|-B|--buffer-size|-A|--last-written|-F|--format|-o|--output)
+            shift
+            [ "$#" -gt 0 ] && shift || true
+            ;;
+        --*=*)
+            shift
+            ;;
+        -*)
+            shift
+            ;;
+        *)
+            files+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ "${#files[@]}" -gt 0 ]; then
+    exec cat -- "${files[@]}"
+fi
+exec cat
+PV_WRAPPER
+    chmod +x "${wrapper_dir}/pv"
+    printf '%s\n' "${wrapper_dir}"
+}
+
 probe_git() {
     local name="$1"
     local url="$2"
@@ -427,11 +470,18 @@ if [ -n "${MAINLINE_MIRROR}" ]; then
     COMPILE_ARGS+=("MAINLINE_MIRROR=${MAINLINE_MIRROR}")
 fi
 
+PV_WRAPPER_DIR=""
+if [ "${EASEPI_R2_DISABLE_ARMBIAN_PV:-yes}" = "yes" ]; then
+    PV_WRAPPER_DIR="$(install_pv_cat_wrapper)"
+    trap 'rm -rf "${PV_WRAPPER_DIR}"' EXIT
+    msg "Using cat-based pv wrapper to avoid rootfs extraction stalls."
+fi
+
 set +e
 # Keep the Armbian build non-interactive without feeding an infinite stream into
 # every child process. Some extraction/logging pipelines inherit stdin; piping
 # `yes` into the whole build can make them wait on the wrong input forever.
-./compile.sh "${COMPILE_ARGS[@]}" </dev/null
+PATH="${PV_WRAPPER_DIR:+${PV_WRAPPER_DIR}:}${PATH}" ./compile.sh "${COMPILE_ARGS[@]}" </dev/null
 BUILD_EXIT="$?"
 set -e
 
