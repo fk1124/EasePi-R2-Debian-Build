@@ -13,19 +13,18 @@ cat > /usr/local/sbin/easepi-r2-eth-order <<'ETH_ORDER'
 #!/usr/bin/env bash
 # Align EasePi-R2 physical port order to kernel interface names without relying
 # on systemd-networkd/NetworkManager.  It reads /proc/device-tree/eth_order and
-# waits for all four target PCIe NICs before doing a two-stage rename.  This
-# avoids first-boot partial renames when PCIe/r8169 coldplug is slower than the
-# network stack.
+# matches each NIC by its stable PCIe root bus/root port path.  Do not rely on
+# the kernel's initial ethX order or on endpoint bus numbers such as 41/21/11/31;
+# those can differ between cold boot and warm reboot.
 set -u
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-DEFAULT_ORDER="0004:41:00.0,0002:21:00.0,0001:11:00.0,0003:31:00.0"
+DEFAULT_ORDER="0004:40,0002:20,0001:10,0003:30"
 TMP_PREFIX="r2tmp"
 LOG_TAG="easepi-r2-eth-order"
-WAIT_TIMEOUT="${EASEPI_R2_ETH_ORDER_WAIT_TIMEOUT:-60}"
+WAIT_TIMEOUT="${EASEPI_R2_ETH_ORDER_WAIT_TIMEOUT:-15}"
 WAIT_INTERVAL="${EASEPI_R2_ETH_ORDER_WAIT_INTERVAL:-1}"
-RENAME_ATTEMPTS="${EASEPI_R2_ETH_ORDER_RENAME_ATTEMPTS:-3}"
-BDFS=()
+SELECTORS=()
 
 log() {
   echo "[$LOG_TAG] $*"
@@ -41,33 +40,71 @@ read_order() {
   printf '%s\n' "$order"
 }
 
-iface_for_bdf() {
-  local bdf="$1" p i dev
-  if [ -d "/sys/bus/pci/devices/$bdf/net" ]; then
-    for p in "/sys/bus/pci/devices/$bdf"/net/*; do
-      [ -e "$p" ] || continue
-      printf '%s\n' "${p##*/}"
-      return 0
-    done
-  fi
+normalize_selector() {
+  local selector="$1" domain bus rest bus_dec root_bus
 
+  # New format: domain:root-bus, e.g. 0004:40.
+  case "$selector" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
+      printf '%s\n' "$selector"
+      return 0
+      ;;
+  esac
+
+  # Backward compatibility for old DTBs that used endpoint BDFs such as
+  # 0004:41:00.0.  On this board the RTL8125 endpoint sits one bus below the
+  # root port, so root-bus = endpoint-bus - 1.
+  case "$selector" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*)
+      domain="${selector%%:*}"
+      rest="${selector#*:}"
+      bus="${rest%%:*}"
+      bus_dec=$((16#$bus))
+      if [ "$bus_dec" -gt 0 ]; then
+        root_bus="$(printf '%02x' $((bus_dec - 1)))"
+        printf '%s:%s\n' "$domain" "$root_bus"
+        return 0
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$selector"
+}
+
+selector_matches_path() {
+  local selector="$1" devpath="$2"
+  case "$devpath" in
+    *"/pci${selector}/"*|*"/${selector}:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+iface_for_selector() {
+  local selector="$1" p i dev
   for p in /sys/class/net/*; do
     [ -e "$p" ] || continue
     i="${p##*/}"
     [ "$i" = "lo" ] && continue
     dev="$(readlink -f "$p/device" 2>/dev/null || true)"
-    case "$dev" in
-      *"/$bdf") printf '%s\n' "$i"; return 0 ;;
-    esac
+    if selector_matches_path "$selector" "$dev"; then
+      printf '%s\n' "$i"
+      return 0
+    fi
   done
   return 1
 }
 
-iface_bdf() {
-  local iface="$1" dev
+selector_for_iface() {
+  local iface="$1" selector dev
   dev="$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)"
   [ -n "$dev" ] || return 1
-  printf '%s\n' "${dev##*/}"
+  for selector in "${SELECTORS[@]}"; do
+    if selector_matches_path "$selector" "$dev"; then
+      printf '%s\n' "$selector"
+      return 0
+    fi
+  done
+  return 1
 }
 
 iface_exists() {
@@ -95,29 +132,30 @@ rename_iface() {
 }
 
 report_alignment() {
-  local i bdf target cur
+  local i selector target cur dev
   for i in 0 1 2 3; do
-    bdf="${BDFS[$i]}"
+    selector="${SELECTORS[$i]}"
     target="eth$i"
-    cur="$(iface_for_bdf "$bdf" || true)"
+    cur="$(iface_for_selector "$selector" || true)"
     if [ -n "$cur" ]; then
-      log "$bdf -> $cur (target $target)"
+      dev="$(readlink -f "/sys/class/net/$cur/device" 2>/dev/null || echo unknown)"
+      log "$selector -> $cur (target $target, path $dev)"
     else
-      log "$bdf -> missing (target $target)"
+      log "$selector -> missing (target $target)"
     fi
   done
 }
 
 wait_for_all_devices() {
-  local deadline missing i bdf cur
+  local deadline missing i selector cur
   deadline=$((SECONDS + WAIT_TIMEOUT))
 
   while :; do
     missing=""
     for i in 0 1 2 3; do
-      bdf="${BDFS[$i]}"
-      cur="$(iface_for_bdf "$bdf" || true)"
-      [ -n "$cur" ] || missing="${missing}${missing:+ }$bdf"
+      selector="${SELECTORS[$i]}"
+      cur="$(iface_for_selector "$selector" || true)"
+      [ -n "$cur" ] || missing="${missing}${missing:+ }$selector"
     done
 
     if [ -z "$missing" ]; then
@@ -138,15 +176,15 @@ wait_for_all_devices() {
 }
 
 verify_alignment() {
-  local i bdf target cur ok=1
+  local i selector target cur ok=1
   for i in 0 1 2 3; do
-    bdf="${BDFS[$i]}"
+    selector="${SELECTORS[$i]}"
     target="eth$i"
-    cur="$(iface_for_bdf "$bdf" || true)"
+    cur="$(iface_for_selector "$selector" || true)"
     if [ "$cur" = "$target" ]; then
       log "verified $target -> $(readlink -f "/sys/class/net/$target/device" 2>/dev/null || echo unknown)"
     else
-      log "verify failed for $bdf: current=${cur:-missing}, target=$target"
+      log "verify failed for $selector: current=${cur:-missing}, target=$target"
       ok=0
     fi
   done
@@ -154,18 +192,18 @@ verify_alignment() {
 }
 
 align_once() {
-  local i bdf cur target tmp tmp_bdf hold
+  local i selector cur target tmp tmp_selector hold
 
   # Stage 1: move every target device to a unique temporary name.  Do not run
   # this unless wait_for_all_devices has confirmed all four target NICs exist.
   for i in 0 1 2 3; do
-    bdf="${BDFS[$i]}"
+    selector="${SELECTORS[$i]}"
     tmp="${TMP_PREFIX}${i}"
-    cur="$(iface_for_bdf "$bdf" || true)"
+    cur="$(iface_for_selector "$selector" || true)"
     if [ "$cur" != "$tmp" ]; then
       if iface_exists "$tmp"; then
-        tmp_bdf="$(iface_bdf "$tmp" || true)"
-        if [ "$tmp_bdf" != "$bdf" ]; then
+        tmp_selector="$(selector_for_iface "$tmp" || true)"
+        if [ "$tmp_selector" != "$selector" ]; then
           rename_iface "$tmp" "$(unique_iface_name "${TMP_PREFIX}x${i}")" || return 1
         fi
       fi
@@ -175,9 +213,9 @@ align_once() {
 
   # Stage 2: move temporary names to final eth0-eth3.
   for i in 0 1 2 3; do
-    bdf="${BDFS[$i]}"
+    selector="${SELECTORS[$i]}"
     target="eth$i"
-    cur="$(iface_for_bdf "$bdf" || true)"
+    cur="$(iface_for_selector "$selector" || true)"
     if [ "$cur" != "$target" ]; then
       if iface_exists "$target"; then
         hold="$(unique_iface_name "${TMP_PREFIX}hold${i}")"
@@ -197,19 +235,25 @@ main() {
     exit 0
   fi
 
-  local order i attempt all_ok=1
+  local order i selector all_ok=1
   order="$(read_order)"
   log "eth_order=$order"
 
-  IFS=',' read -r -a BDFS <<< "$order"
-  if [ "${#BDFS[@]}" -lt 4 ]; then
+  IFS=',' read -r -a SELECTORS <<< "$order"
+  if [ "${#SELECTORS[@]}" -lt 4 ]; then
     log "eth_order has less than 4 entries; fallback to $DEFAULT_ORDER"
-    IFS=',' read -r -a BDFS <<< "$DEFAULT_ORDER"
+    IFS=',' read -r -a SELECTORS <<< "$DEFAULT_ORDER"
   fi
+
+  for i in 0 1 2 3; do
+    selector="$(normalize_selector "${SELECTORS[$i]}")"
+    SELECTORS[$i]="$selector"
+    log "target eth$i selector=$selector"
+  done
 
   # Quick path: already correct.
   for i in 0 1 2 3; do
-    if [ "$(iface_for_bdf "${BDFS[$i]}" || true)" != "eth$i" ]; then
+    if [ "$(iface_for_selector "${SELECTORS[$i]}" || true)" != "eth$i" ]; then
       all_ok=0
     fi
   done
@@ -218,15 +262,434 @@ main() {
     exit 0
   fi
 
-  for attempt in $(seq 1 "$RENAME_ATTEMPTS"); do
-    log "alignment attempt $attempt/$RENAME_ATTEMPTS"
-    if wait_for_all_devices && align_once; then
-      log "port order aligned successfully"
-      exit 0
+  if wait_for_all_devices && align_once; then
+    log "port order aligned successfully"
+    exit 0
+  fi
+
+  log "failed to align port order"
+  report_alignment
+  exit 1
+}
+
+main "$@"
+ETH_ORDER"
+  case "$devpath" in
+    *"/pci${selector}/"*|*"/${selector}:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+iface_for_selector() {
+  local selector="cat > /usr/local/sbin/easepi-r2-eth-order <<'ETH_ORDER'
+#!/usr/bin/env bash
+# Align EasePi-R2 physical port order to kernel interface names without relying
+# on systemd-networkd/NetworkManager.  It reads /proc/device-tree/eth_order and
+# matches each NIC by its stable PCIe root bus/root port path.  Do not rely on
+# the kernel's initial ethX order or on endpoint bus numbers such as 41/21/11/31;
+# those can differ between cold boot and warm reboot.
+set -u
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+DEFAULT_ORDER="0004:40,0002:20,0001:10,0003:30"
+TMP_PREFIX="r2tmp"
+LOG_TAG="easepi-r2-eth-order"
+WAIT_TIMEOUT="${EASEPI_R2_ETH_ORDER_WAIT_TIMEOUT:-15}"
+WAIT_INTERVAL="${EASEPI_R2_ETH_ORDER_WAIT_INTERVAL:-1}"
+SELECTORS=()
+
+log() {
+  echo "[$LOG_TAG] $*"
+  command -v logger >/dev/null 2>&1 && logger -t "$LOG_TAG" -- "$*" || true
+}
+
+read_order() {
+  local order=""
+  if [ -r /proc/device-tree/eth_order ]; then
+    order="$(tr -d '\000' < /proc/device-tree/eth_order 2>/dev/null | tr -d '[:space:]')"
+  fi
+  [ -n "$order" ] || order="$DEFAULT_ORDER"
+  printf '%s\n' "$order"
+}
+
+normalize_selector() {
+  local selector="$1" domain bus rest bus_dec root_bus
+
+  # New format: domain:root-bus, e.g. 0004:40.
+  case "$selector" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
+      printf '%s\n' "$selector"
+      return 0
+      ;;
+  esac
+
+  # Backward compatibility for old DTBs that used endpoint BDFs such as
+  # 0004:41:00.0.  On this board the RTL8125 endpoint sits one bus below the
+  # root port, so root-bus = endpoint-bus - 1.
+  case "$selector" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*)
+      domain="${selector%%:*}"
+      rest="${selector#*:}"
+      bus="${rest%%:*}"
+      bus_dec=$((16#$bus))
+      if [ "$bus_dec" -gt 0 ]; then
+        root_bus="$(printf '%02x' $((bus_dec - 1)))"
+        printf '%s:%s\n' "$domain" "$root_bus"
+        return 0
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$selector"
+}
+
+selector_matches_path() {
+  local selector="$1" devpath="$2"
+  case "$devpath" in
+    *"/pci${selector}/"*|*"/${selector}:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+iface_for_selector() {
+  local selector="$1" p i dev
+  for p in /sys/class/net/*; do
+    [ -e "$p" ] || continue
+    i="${p##*/}"
+    [ "$i" = "lo" ] && continue
+    dev="$(readlink -f "$p/device" 2>/dev/null || true)"
+    if selector_matches_path "$selector" "$dev"; then
+      printf '%s\n' "$i"
+      return 0
     fi
-    log "alignment attempt $attempt failed"
-    sleep 1
   done
+  return 1
+}
+
+selector_for_iface() {
+  local iface="$1" selector dev
+  dev="$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)"
+  [ -n "$dev" ] || return 1
+  for selector in "${SELECTORS[@]}"; do
+    if selector_matches_path "$selector" "$dev"; then
+      printf '%s\n' "$selector"
+      return 0
+    fi
+  done
+  return 1
+}
+
+iface_exists() {
+  [ -e "/sys/class/net/$1" ]
+}
+
+unique_iface_name() {
+  local base="$1" name="$1" n=0
+  while iface_exists "$name"; do
+    n=$((n + 1))
+    name="${base}${n}"
+  done
+  printf '%s\n' "$name"
+}
+
+rename_iface() {
+  local old="$1" new="$2"
+  [ -n "$old" ] && [ -n "$new" ] || return 1
+  [ "$old" = "$new" ] && return 0
+  iface_exists "$old" || { log "skip: $old not found while renaming to $new"; return 1; }
+
+  log "rename $old -> $new"
+  ip link set dev "$old" down 2>/dev/null || true
+  ip link set dev "$old" name "$new"
+}
+
+report_alignment() {
+  local i selector target cur dev
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ -n "$cur" ]; then
+      dev="$(readlink -f "/sys/class/net/$cur/device" 2>/dev/null || echo unknown)"
+      log "$selector -> $cur (target $target, path $dev)"
+    else
+      log "$selector -> missing (target $target)"
+    fi
+  done
+}
+
+wait_for_all_devices() {
+  local deadline missing i selector cur
+  deadline=$((SECONDS + WAIT_TIMEOUT))
+
+  while :; do
+    missing=""
+    for i in 0 1 2 3; do
+      selector="${SELECTORS[$i]}"
+      cur="$(iface_for_selector "$selector" || true)"
+      [ -n "$cur" ] || missing="${missing}${missing:+ }$selector"
+    done
+
+    if [ -z "$missing" ]; then
+      log "all target RTL8125 interfaces are present"
+      return 0
+    fi
+
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      log "timeout waiting for target interfaces; missing: $missing"
+      report_alignment
+      return 1
+    fi
+
+    log "waiting for target interfaces; missing: $missing"
+    command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    sleep "$WAIT_INTERVAL"
+  done
+}
+
+verify_alignment() {
+  local i selector target cur ok=1
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ "$cur" = "$target" ]; then
+      log "verified $target -> $(readlink -f "/sys/class/net/$target/device" 2>/dev/null || echo unknown)"
+    else
+      log "verify failed for $selector: current=${cur:-missing}, target=$target"
+      ok=0
+    fi
+  done
+  [ "$ok" = "1" ]
+}
+
+align_once() {
+  local i selector cur target tmp tmp_selector hold
+
+  # Stage 1: move every target device to a unique temporary name.  Do not run
+  # this unless wait_for_all_devices has confirmed all four target NICs exist.
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    tmp="${TMP_PREFIX}${i}"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ "$cur" != "$tmp" ]; then
+      if iface_exists "$tmp"; then
+        tmp_selector="$(selector_for_iface "$tmp" || true)"
+        if [ "$tmp_selector" != "$selector" ]; then
+          rename_iface "$tmp" "$(unique_iface_name "${TMP_PREFIX}x${i}")" || return 1
+        fi
+      fi
+      rename_iface "$cur" "$tmp" || return 1
+    fi
+  done
+
+  # Stage 2: move temporary names to final eth0-eth3.
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ "$cur" != "$target" ]; then
+      if iface_exists "$target"; then
+        hold="$(unique_iface_name "${TMP_PREFIX}hold${i}")"
+        log "target $target still exists before final rename; move it aside as $hold"
+        rename_iface "$target" "$hold" || return 1
+      fi
+      rename_iface "$cur" "$target" || return 1
+    fi
+  done
+
+  verify_alignment
+}
+
+main() {
+  if ! command -v ip >/dev/null 2>&1; then
+    log "ip command not found; cannot align port names"
+    exit 0
+  fi
+
+  local order i selector all_ok=1
+  order="$(read_order)"
+  log "eth_order=$order"
+
+  IFS=',' read -r -a SELECTORS <<< "$order"
+  if [ "${#SELECTORS[@]}" -lt 4 ]; then
+    log "eth_order has less than 4 entries; fallback to $DEFAULT_ORDER"
+    IFS=',' read -r -a SELECTORS <<< "$DEFAULT_ORDER"
+  fi
+
+  for i in 0 1 2 3; do
+    selector="$(normalize_selector "${SELECTORS[$i]}")"
+    SELECTORS[$i]="$selector"
+    log "target eth$i selector=$selector"
+  done
+
+  # Quick path: already correct.
+  for i in 0 1 2 3; do
+    if [ "$(iface_for_selector "${SELECTORS[$i]}" || true)" != "eth$i" ]; then
+      all_ok=0
+    fi
+  done
+  if [ "$all_ok" = "1" ]; then
+    log "port order already aligned; nothing to do"
+    exit 0
+  fi
+
+  if wait_for_all_devices && align_once; then
+    log "port order aligned successfully"
+    exit 0
+  fi
+
+  log "failed to align port order"
+  report_alignment
+  exit 1
+}
+
+main "$@"
+ETH_ORDER"
+  [ -n "$old" ] && [ -n "$new" ] || return 1
+  [ "$old" = "$new" ] && return 0
+  iface_exists "$old" || { log "skip: $old not found while renaming to $new"; return 1; }
+
+  log "rename $old -> $new"
+  ip link set dev "$old" down 2>/dev/null || true
+  ip link set dev "$old" name "$new"
+}
+
+report_alignment() {
+  local i selector target cur dev
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ -n "$cur" ]; then
+      dev="$(readlink -f "/sys/class/net/$cur/device" 2>/dev/null || echo unknown)"
+      log "$selector -> $cur (target $target, path $dev)"
+    else
+      log "$selector -> missing (target $target)"
+    fi
+  done
+}
+
+wait_for_all_devices() {
+  local deadline missing i selector cur
+  deadline=$((SECONDS + WAIT_TIMEOUT))
+
+  while :; do
+    missing=""
+    for i in 0 1 2 3; do
+      selector="${SELECTORS[$i]}"
+      cur="$(iface_for_selector "$selector" || true)"
+      [ -n "$cur" ] || missing="${missing}${missing:+ }$selector"
+    done
+
+    if [ -z "$missing" ]; then
+      log "all target RTL8125 interfaces are present"
+      return 0
+    fi
+
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      log "timeout waiting for target interfaces; missing: $missing"
+      report_alignment
+      return 1
+    fi
+
+    log "waiting for target interfaces; missing: $missing"
+    command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    sleep "$WAIT_INTERVAL"
+  done
+}
+
+verify_alignment() {
+  local i selector target cur ok=1
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ "$cur" = "$target" ]; then
+      log "verified $target -> $(readlink -f "/sys/class/net/$target/device" 2>/dev/null || echo unknown)"
+    else
+      log "verify failed for $selector: current=${cur:-missing}, target=$target"
+      ok=0
+    fi
+  done
+  [ "$ok" = "1" ]
+}
+
+align_once() {
+  local i selector cur target tmp tmp_selector hold
+
+  # Stage 1: move every target device to a unique temporary name.  Do not run
+  # this unless wait_for_all_devices has confirmed all four target NICs exist.
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    tmp="${TMP_PREFIX}${i}"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ "$cur" != "$tmp" ]; then
+      if iface_exists "$tmp"; then
+        tmp_selector="$(selector_for_iface "$tmp" || true)"
+        if [ "$tmp_selector" != "$selector" ]; then
+          rename_iface "$tmp" "$(unique_iface_name "${TMP_PREFIX}x${i}")" || return 1
+        fi
+      fi
+      rename_iface "$cur" "$tmp" || return 1
+    fi
+  done
+
+  # Stage 2: move temporary names to final eth0-eth3.
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_selector "$selector" || true)"
+    if [ "$cur" != "$target" ]; then
+      if iface_exists "$target"; then
+        hold="$(unique_iface_name "${TMP_PREFIX}hold${i}")"
+        log "target $target still exists before final rename; move it aside as $hold"
+        rename_iface "$target" "$hold" || return 1
+      fi
+      rename_iface "$cur" "$target" || return 1
+    fi
+  done
+
+  verify_alignment
+}
+
+main() {
+  if ! command -v ip >/dev/null 2>&1; then
+    log "ip command not found; cannot align port names"
+    exit 0
+  fi
+
+  local order i selector all_ok=1
+  order="$(read_order)"
+  log "eth_order=$order"
+
+  IFS=',' read -r -a SELECTORS <<< "$order"
+  if [ "${#SELECTORS[@]}" -lt 4 ]; then
+    log "eth_order has less than 4 entries; fallback to $DEFAULT_ORDER"
+    IFS=',' read -r -a SELECTORS <<< "$DEFAULT_ORDER"
+  fi
+
+  for i in 0 1 2 3; do
+    selector="$(normalize_selector "${SELECTORS[$i]}")"
+    SELECTORS[$i]="$selector"
+    log "target eth$i selector=$selector"
+  fi
+
+  # Quick path: already correct.
+  for i in 0 1 2 3; do
+    if [ "$(iface_for_selector "${SELECTORS[$i]}" || true)" != "eth$i" ]; then
+      all_ok=0
+    fi
+  done
+  if [ "$all_ok" = "1" ]; then
+    log "port order already aligned; nothing to do"
+    exit 0
+  fi
+
+  if wait_for_all_devices && align_once; then
+    log "port order aligned successfully"
+    exit 0
+  fi
 
   log "failed to align port order"
   report_alignment
@@ -245,16 +708,12 @@ Wants=systemd-udev-trigger.service systemd-udev-settle.service network-pre.targe
 After=local-fs.target systemd-udevd.service systemd-udev-trigger.service systemd-udev-settle.service
 Before=network-pre.target network.target systemd-networkd.service NetworkManager.service networking.service dnsmasq.service nftables.service
 ConditionPathExists=/sys/class/net
-StartLimitIntervalSec=180
-StartLimitBurst=3
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/easepi-r2-eth-order
 RemainAfterExit=yes
-TimeoutStartSec=90
-Restart=on-failure
-RestartSec=3
+TimeoutStartSec=30
 
 [Install]
 WantedBy=sysinit.target

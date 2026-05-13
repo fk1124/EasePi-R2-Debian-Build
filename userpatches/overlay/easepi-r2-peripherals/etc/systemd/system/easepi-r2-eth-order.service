@@ -5,16 +5,12 @@ Wants=systemd-udev-trigger.service systemd-udev-settle.service network-pre.targe
 After=local-fs.target systemd-udevd.service systemd-udev-trigger.service systemd-udev-settle.service
 Before=network-pre.target network.target systemd-networkd.service NetworkManager.service networking.service dnsmasq.service nftables.service
 ConditionPathExists=/sys/class/net
-StartLimitIntervalSec=180
-StartLimitBurst=3
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/easepi-r2-eth-order
 RemainAfterExit=yes
-TimeoutStartSec=90
-Restart=on-failure
-RestartSec=3
+TimeoutStartSec=30
 
 [Install]
 WantedBy=sysinit.target
