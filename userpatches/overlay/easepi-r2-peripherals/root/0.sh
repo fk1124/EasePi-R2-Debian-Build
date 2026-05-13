@@ -1350,17 +1350,27 @@ configure_wlan(){
   if ask_yn "是否立即应用？" n; then apply_now; else pause; fi
 }
 
+is_vendor_gpu_runtime(){
+  grep -qiE 'vendor|rk35xx' /proc/version 2>/dev/null && return 0
+  modinfo mali_kbase >/dev/null 2>&1 && return 0
+  [ -e /dev/mali0 ] && return 0
+  [ -e /dev/mali ] && return 0
+  return 1
+}
+
 install_deps(){
   require_root
+  GPU_PACKAGES=(libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri mesa-vulkan-drivers mesa-utils vulkan-tools kmscube glmark2-es2-drm)
+  if is_vendor_gpu_runtime; then
+    GPU_PACKAGES=(libdrm2 libgbm1 ocl-icd-libopencl1 clinfo)
+  fi
   apt-get update
   apt-get install -y \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
     iproute2 ethtool dnsmasq nftables ppp pppoe curl ca-certificates bridge-utils wpasupplicant hostapd \
     rfkill bluetooth bluez bluez-tools \
-    libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri \
-    mesa-vulkan-drivers mesa-utils vulkan-tools \
-    kmscube glmark2-es2-drm v4l-utils || true
+    v4l-utils "${GPU_PACKAGES[@]}" || true
   FW_DIR="/lib/firmware/brcm"
   BT_PATCH="BCM4345C0_003.001.025.0162.0000_Generic_UART_37_4MHz_wlbga_ref_iLNA_iTR_eLG.hcd"
   if [ -d "$FW_DIR" ]; then

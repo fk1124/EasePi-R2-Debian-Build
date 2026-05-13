@@ -252,15 +252,34 @@ choose_github_source() {
     GITHUB_SOURCE="https://github.com"
 }
 
+set_kernel_config_not_set() {
+    local file="$1"
+    local name="$2"
+
+    sed -i -E "/^${name}=|^# ${name} is not set/d" "${file}"
+    printf '# %s is not set\n' "${name}" >> "${file}"
+}
+
+set_kernel_config_value() {
+    local file="$1"
+    local name="$2"
+    local value="$3"
+
+    sed -i -E "/^${name}=|^# ${name} is not set/d" "${file}"
+    printf '%s=%s\n' "${name}" "${value}" >> "${file}"
+}
+
 prepare_kernel_configs() {
     mkdir -p "${REPO_DIR}/userpatches"
 
-    local cfg src dst found
+    local cfg src dst found refresh
     local configs=(
         "linux-rockchip64-current.config"
         "linux-rockchip64-edge.config"
         "linux-rk35xx-vendor.config"
     )
+
+    refresh="${EASEPI_R2_REFRESH_KERNEL_CONFIGS:-no}"
 
     for cfg in "${configs[@]}"; do
         src="${BUILD_DIR}/config/kernel/${cfg}"
@@ -273,10 +292,10 @@ prepare_kernel_configs() {
             found="$(find "${BUILD_DIR}/config" -type f -name "${cfg}" 2>/dev/null | head -1 || true)"
         fi
 
-        if [ -n "${found}" ] && [ -f "${found}" ]; then
+        if [ -n "${found}" ] && [ -f "${found}" ] && { [ ! -f "${dst}" ] || [ "${refresh}" = "yes" ]; }; then
             cp -f "${found}" "${dst}"
         elif [ -f "${dst}" ]; then
-            msg "WARN: default kernel config not found, patch existing user config: ${dst}"
+            msg "Reuse existing kernel config: ${dst}"
         else
             msg "WARN: default kernel config not found and user config missing: ${cfg}"
             continue
@@ -301,6 +320,30 @@ prepare_kernel_configs() {
 
         grep -q '^# CONFIG_DRM_PANEL_SIMPLE_DSI is not set' "${dst}" || \
             echo '# CONFIG_DRM_PANEL_SIMPLE_DSI is not set' >> "${dst}"
+
+        set_kernel_config_not_set "${dst}" "CONFIG_RTL8852BS"
+
+        if [ "${cfg}" = "linux-rk35xx-vendor.config" ]; then
+            set_kernel_config_not_set "${dst}" "CONFIG_DRM_PANFROST"
+            set_kernel_config_not_set "${dst}" "CONFIG_DRM_PANTHOR"
+            set_kernel_config_not_set "${dst}" "CONFIG_AP6XXX"
+            set_kernel_config_not_set "${dst}" "CONFIG_BCMDHD_PCIE"
+            set_kernel_config_not_set "${dst}" "CONFIG_BCMDHD_FW_PATH"
+            set_kernel_config_not_set "${dst}" "CONFIG_BCMDHD_NVRAM_PATH"
+
+            set_kernel_config_value "${dst}" "CONFIG_BRCMFMAC" "m"
+            set_kernel_config_value "${dst}" "CONFIG_BRCMFMAC_SDIO" "y"
+            set_kernel_config_value "${dst}" "CONFIG_BT_HCIUART_BCM" "y"
+            set_kernel_config_value "${dst}" "CONFIG_MALI_DEVFREQ" "y"
+            set_kernel_config_value "${dst}" "CONFIG_MALI_MIDGARD" "y"
+            set_kernel_config_value "${dst}" "CONFIG_MALI_EXPERT" "y"
+            set_kernel_config_value "${dst}" "CONFIG_MALI_PLATFORM_THIRDPARTY" "y"
+            set_kernel_config_value "${dst}" "CONFIG_MALI_PLATFORM_THIRDPARTY_NAME" '"rk"'
+            set_kernel_config_value "${dst}" "CONFIG_MALI_BIFROST" "y"
+            set_kernel_config_value "${dst}" "CONFIG_MALI_PLATFORM_NAME" '"rk"'
+            set_kernel_config_value "${dst}" "CONFIG_MALI_CSF_SUPPORT" "y"
+            set_kernel_config_value "${dst}" "CONFIG_MALI_BIFROST_EXPERT" "y"
+        fi
 
         msg "Prepared kernel config: ${dst}"
     done

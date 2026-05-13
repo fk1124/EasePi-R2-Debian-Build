@@ -3,8 +3,56 @@
 # for broad Armbian compatibility, while reading overlay files from the kit's
 # userpatches/overlay/easepi-r2-peripherals directory.
 
+: "${EASEPI_R2_VENDOR_GPU_STACK:=libmali}"
+: "${EASEPI_R2_LIBMALI_DEB_URL:=https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb}"
+: "${EASEPI_R2_LIBMALI_DEB_SHA256:=32ffe853e8d56295284637252f1da15dd868a8f7c6b8da6b9f77616ba285eb1a}"
+
 function extension_prepare_config__easepi_r2_peripherals() {
 	display_alert "Extension: EasePi-R2 Peripherals" "IR + Bluetooth + networkd router base" "info"
+}
+
+function easepi_r2_write_gpu_profile() {
+	mkdir -p "${SDCARD}/etc/modules-load.d" "${SDCARD}/etc/modprobe.d"
+
+	if [[ "${BRANCH:-current}" == "vendor" ]]; then
+		cat > "${SDCARD}/etc/modules-load.d/easepi-r2-gpu.conf" <<'EOF_GPU_MODULES_VENDOR'
+# Rockchip vendor 6.1 uses the in-tree Mali kbase driver. Do not force-load panthor.
+EOF_GPU_MODULES_VENDOR
+		cat > "${SDCARD}/etc/modprobe.d/easepi-r2-gpu.conf" <<'EOF_GPU_MODPROBE_VENDOR'
+# Vendor kernel uses ARM/Rockchip Mali kbase for RK3588 Mali-G610.
+blacklist panfrost
+blacklist panthor
+EOF_GPU_MODPROBE_VENDOR
+	else
+		cat > "${SDCARD}/etc/modules-load.d/easepi-r2-gpu.conf" <<'EOF_GPU_MODULES_MAINLINE'
+# Load RK3588 Mali-G610's mainline DRM driver early.
+panthor
+EOF_GPU_MODULES_MAINLINE
+		cat > "${SDCARD}/etc/modprobe.d/easepi-r2-gpu.conf" <<'EOF_GPU_MODPROBE_MAINLINE'
+# panfrost is for older Mali generations and should not bind this GPU.
+blacklist panfrost
+EOF_GPU_MODPROBE_MAINLINE
+	fi
+}
+
+function easepi_r2_stage_vendor_libmali() {
+	[[ "${BRANCH:-current}" == "vendor" ]] || return 0
+	[[ "${EASEPI_R2_VENDOR_GPU_STACK}" == "libmali" ]] || return 0
+
+	local cache_root="${SRC:-/tmp}/cache/easepi-r2-libmali"
+	local deb_name deb_path tmp_path
+
+	deb_name="$(basename "${EASEPI_R2_LIBMALI_DEB_URL}")"
+	deb_path="${cache_root}/${deb_name}"
+	tmp_path="${deb_path}.tmp"
+
+	mkdir -p "${cache_root}" "${SDCARD}/tmp"
+	if [[ ! -f "${deb_path}" ]]; then
+		curl -fL --retry 3 --connect-timeout 15 -o "${tmp_path}" "${EASEPI_R2_LIBMALI_DEB_URL}"
+		mv -f "${tmp_path}" "${deb_path}"
+	fi
+	printf '%s  %s\n' "${EASEPI_R2_LIBMALI_DEB_SHA256}" "${deb_path}" | sha256sum -c -
+	cp -f "${deb_path}" "${SDCARD}/tmp/easepi-r2-libmali.deb"
 }
 
 function pre_customize_image__copy_easepi_r2_peripheral_files() {
@@ -33,6 +81,7 @@ function pre_customize_image__copy_easepi_r2_peripheral_files() {
 	rm -f "${SDCARD}/etc/modprobe.d/99-easepi-r2-panthor-manual-only.conf"
 	rm -f "${SDCARD}/usr/local/sbin/easepi-r2-gpu-check"
 	chmod +x "${SDCARD}/usr/local/sbin/easepi-r2-eth-order" 2>/dev/null || true
+	easepi_r2_write_gpu_profile
 
 	if [[ -f "${SDCARD}/usr/local/sbin/bluetooth-hciattach.sh" ]]; then
 		chmod +x "${SDCARD}/usr/local/sbin/bluetooth-hciattach.sh"
@@ -76,23 +125,45 @@ function post_customize_image__enable_easepi_r2_peripheral_services() {
 	display_alert "EasePi-R2" "Installing router runtime packages" "info"
 	local R2_NFT_BACKUP="${SDCARD}/tmp/easepi-r2-nftables.conf.router"
 	mkdir -p "${SDCARD}/tmp"
+	easepi_r2_stage_vendor_libmali
 	if [[ -f "${SDCARD}/etc/nftables.conf" ]]; then
 		mv "${SDCARD}/etc/nftables.conf" "${R2_NFT_BACKUP}"
+	fi
+	local EASEPI_R2_COMMON_RUNTIME=(
+		iproute2 iputils-ping ethtool bridge-utils
+		dnsmasq nftables iptables
+		ppp pppoe curl ca-certificates
+		wpasupplicant hostapd
+		rfkill bluetooth bluez bluez-tools
+		v4l-utils
+	)
+	local EASEPI_R2_GPU_RUNTIME=()
+	if [[ "${BRANCH:-current}" == "vendor" ]]; then
+		EASEPI_R2_GPU_RUNTIME=(libdrm2 libgbm1 ocl-icd-libopencl1 clinfo)
+	else
+		EASEPI_R2_GPU_RUNTIME=(
+			libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri
+			mesa-vulkan-drivers mesa-utils vulkan-tools
+			kmscube glmark2-es2-drm
+		)
 	fi
 	chroot_sdcard apt-get update || true
 	chroot_sdcard apt-get install -y --no-install-recommends \
 		-o Dpkg::Options::=--force-confdef \
 		-o Dpkg::Options::=--force-confold \
-		iproute2 iputils-ping ethtool bridge-utils \
-		dnsmasq nftables iptables \
-		ppp pppoe curl ca-certificates \
-		wpasupplicant hostapd \
-		rfkill bluetooth bluez bluez-tools \
-		libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri \
-		mesa-vulkan-drivers mesa-utils vulkan-tools \
-		kmscube glmark2-es2-drm v4l-utils || true
+		"${EASEPI_R2_COMMON_RUNTIME[@]}" \
+		"${EASEPI_R2_GPU_RUNTIME[@]}" || true
 	if [[ -f "${R2_NFT_BACKUP}" ]]; then
 		mv "${R2_NFT_BACKUP}" "${SDCARD}/etc/nftables.conf"
+	fi
+	if [[ "${BRANCH:-current}" == "vendor" && "${EASEPI_R2_VENDOR_GPU_STACK}" == "libmali" && -f "${SDCARD}/tmp/easepi-r2-libmali.deb" ]]; then
+		chroot_sdcard apt-get update || true
+		chroot_sdcard apt-get install -y --no-install-recommends \
+			-o Dpkg::Options::=--force-confdef \
+			-o Dpkg::Options::=--force-confold \
+			libdrm2 libgbm1 ocl-icd-libopencl1 clinfo v4l-utils ca-certificates || true
+		chroot_sdcard dpkg -i /tmp/easepi-r2-libmali.deb || chroot_sdcard apt-get -f install -y
+		rm -f "${SDCARD}/tmp/easepi-r2-libmali.deb"
 	fi
 	easepi_r2_fix_brcm_firmware_aliases
 

@@ -20,6 +20,9 @@ IMAGE_PASSWORD="${IMAGE_PASSWORD:-}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-}"
 LOCK_ROOT="${LOCK_ROOT:-no}"
 TARGET_HOSTNAME="${TARGET_HOSTNAME:-easepi-r2}"
+EASEPI_R2_VENDOR_GPU_STACK="${EASEPI_R2_VENDOR_GPU_STACK:-libmali}"
+EASEPI_R2_LIBMALI_DEB_URL="${EASEPI_R2_LIBMALI_DEB_URL:-https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb}"
+EASEPI_R2_LIBMALI_DEB_SHA256="${EASEPI_R2_LIBMALI_DEB_SHA256:-32ffe853e8d56295284637252f1da15dd868a8f7c6b8da6b9f77616ba285eb1a}"
 
 printf '\n[3/4] Install EasePi-R2 kernel / DTB / boot files into rootfs\n'
 
@@ -47,8 +50,54 @@ cleanup_mounts() {
 }
 trap cleanup_mounts EXIT
 
+stage_vendor_libmali() {
+    [ "${BRANCH}" = "vendor" ] || return 0
+    [ "${EASEPI_R2_VENDOR_GPU_STACK}" = "libmali" ] || return 0
+
+    local cache_dir="${REPO_DIR}/work/cache/libmali"
+    local deb_name deb_path tmp_path
+
+    deb_name="$(basename "${EASEPI_R2_LIBMALI_DEB_URL}")"
+    deb_path="${cache_dir}/${deb_name}"
+    tmp_path="${deb_path}.tmp"
+
+    mkdir -p "${cache_dir}"
+    if [ ! -f "${deb_path}" ]; then
+        curl -fL --retry 3 --connect-timeout 15 -o "${tmp_path}" "${EASEPI_R2_LIBMALI_DEB_URL}"
+        mv -f "${tmp_path}" "${deb_path}"
+    fi
+
+    printf '%s  %s\n' "${EASEPI_R2_LIBMALI_DEB_SHA256}" "${deb_path}" | sha256sum -c -
+    ${SUDO} cp "${deb_path}" "${ROOTFS_DIR}/tmp/easepi-r2-libmali.deb"
+}
+
+write_gpu_profile() {
+    ${SUDO} mkdir -p "${ROOTFS_DIR}/etc/modules-load.d" "${ROOTFS_DIR}/etc/modprobe.d"
+
+    if [ "${BRANCH}" = "vendor" ]; then
+        ${SUDO} tee "${ROOTFS_DIR}/etc/modules-load.d/easepi-r2-gpu.conf" >/dev/null <<'EOF_GPU_MODULES_VENDOR'
+# Rockchip vendor 6.1 uses the in-tree Mali kbase driver. Do not force-load panthor.
+EOF_GPU_MODULES_VENDOR
+        ${SUDO} tee "${ROOTFS_DIR}/etc/modprobe.d/easepi-r2-gpu.conf" >/dev/null <<'EOF_GPU_MODPROBE_VENDOR'
+# Vendor kernel uses ARM/Rockchip Mali kbase for RK3588 Mali-G610.
+blacklist panfrost
+blacklist panthor
+EOF_GPU_MODPROBE_VENDOR
+    else
+        ${SUDO} tee "${ROOTFS_DIR}/etc/modules-load.d/easepi-r2-gpu.conf" >/dev/null <<'EOF_GPU_MODULES_MAINLINE'
+# Load RK3588 Mali-G610's mainline DRM driver early.
+panthor
+EOF_GPU_MODULES_MAINLINE
+        ${SUDO} tee "${ROOTFS_DIR}/etc/modprobe.d/easepi-r2-gpu.conf" >/dev/null <<'EOF_GPU_MODPROBE_MAINLINE'
+# panfrost is for older Mali generations and should not bind this GPU.
+blacklist panfrost
+EOF_GPU_MODPROBE_MAINLINE
+    fi
+}
+
 ${SUDO} mkdir -p "${ROOTFS_DIR}/tmp/bsp"
 ${SUDO} cp "${BSP_DIR}"/*.deb "${ROOTFS_DIR}/tmp/bsp/"
+stage_vendor_libmali
 
 ${SUDO} mount --bind /dev "${ROOTFS_DIR}/dev"
 ${SUDO} mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
@@ -93,6 +142,7 @@ if [ -d "${REPO_DIR}/userpatches/overlay/easepi-r2-peripherals" ]; then
     ${SUDO} rm -f "${ROOTFS_DIR}/usr/local/sbin/easepi-r2-gpu-check"
     ${SUDO} chmod +x "${ROOTFS_DIR}/usr/local/sbin/easepi-r2-eth-order" 2>/dev/null || true
 fi
+write_gpu_profile
 
 # Basic system identity and optional account configuration.
 ${SUDO} tee "${ROOTFS_DIR}/etc/hostname" >/dev/null <<EOF_HOST
@@ -114,6 +164,8 @@ ${SUDO} chroot "${ROOTFS_DIR}" /usr/bin/env \
   IMAGE_PASSWORD="${IMAGE_PASSWORD}" \
   ROOT_PASSWORD="${ROOT_PASSWORD}" \
   LOCK_ROOT="${LOCK_ROOT}" \
+  BRANCH="${BRANCH}" \
+  EASEPI_R2_VENDOR_GPU_STACK="${EASEPI_R2_VENDOR_GPU_STACK}" \
   /bin/bash -e <<'CHROOT_USER'
 export DEBIAN_FRONTEND=noninteractive
 
@@ -170,18 +222,39 @@ if ! command -v dnsmasq >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1; the
   if [ -f /etc/nftables.conf ]; then
     mv /etc/nftables.conf "$NFT_BACKUP"
   fi
+  EASEPI_R2_COMMON_RUNTIME=(
+    iproute2 iputils-ping ethtool bridge-utils dnsmasq nftables iptables
+    ppp pppoe curl ca-certificates wpasupplicant hostapd
+    rfkill bluetooth bluez bluez-tools v4l-utils
+  )
+  if [ "${BRANCH}" = "vendor" ]; then
+    EASEPI_R2_GPU_RUNTIME=(libdrm2 libgbm1 ocl-icd-libopencl1 clinfo)
+  else
+    EASEPI_R2_GPU_RUNTIME=(
+      libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri
+      mesa-vulkan-drivers mesa-utils vulkan-tools
+      kmscube glmark2-es2-drm
+    )
+  fi
   apt-get update || true
   apt-get install -y --no-install-recommends \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
-    iproute2 iputils-ping ethtool bridge-utils dnsmasq nftables iptables ppp pppoe curl ca-certificates wpasupplicant hostapd \
-    rfkill bluetooth bluez bluez-tools \
-    libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri \
-    mesa-vulkan-drivers mesa-utils vulkan-tools \
-    kmscube glmark2-es2-drm v4l-utils || true
+    "${EASEPI_R2_COMMON_RUNTIME[@]}" \
+    "${EASEPI_R2_GPU_RUNTIME[@]}" || true
   if [ -f "$NFT_BACKUP" ]; then
     mv "$NFT_BACKUP" /etc/nftables.conf
   fi
+fi
+
+if [ "${BRANCH}" = "vendor" ] && [ "${EASEPI_R2_VENDOR_GPU_STACK}" = "libmali" ] && [ -f /tmp/easepi-r2-libmali.deb ]; then
+  apt-get update || true
+  apt-get install -y --no-install-recommends \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    libdrm2 libgbm1 ocl-icd-libopencl1 clinfo v4l-utils ca-certificates || true
+  dpkg -i /tmp/easepi-r2-libmali.deb || apt-get -f install -y
+  rm -f /tmp/easepi-r2-libmali.deb
 fi
 
 FW_DIR="/lib/firmware/brcm"

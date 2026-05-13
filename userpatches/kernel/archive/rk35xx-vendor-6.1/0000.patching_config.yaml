@@ -1,0 +1,11 @@
+config:
+  name: rk35xx-vendor-6.1
+  kind: kernel
+  type: vendor
+  branch: rk-6.1-rkr5.1
+
+  dts-directories:
+    - { source: "dt", target: "arch/arm64/boot/dts/rockchip" }
+
+  auto-patch-dt-makefile:
+    - { directory: "arch/arm64/boot/dts/rockchip", config-var: "CONFIG_ARCH_ROCKCHIP" }

@@ -50,12 +50,34 @@ cleanup_mounts() {
 }
 trap cleanup_mounts EXIT
 
+write_minimal_package_list() {
+    local src="${REPO_DIR}/rootfs/${DIST}/packages-minimal.txt"
+    local tmp
+
+    tmp="$(mktemp)"
+    if [ "${BRANCH}" = "vendor" ]; then
+        grep -vE '^[[:space:]]*(libegl-mesa0|libgles2|libgl1-mesa-dri|mesa-utils|mesa-vulkan-drivers|vulkan-tools|kmscube|glmark2-es2-drm)[[:space:]]*$' "${src}" > "${tmp}"
+        cat >> "${tmp}" <<'EOF_VENDOR_GPU'
+libdrm2
+libgbm1
+ocl-icd-libopencl1
+clinfo
+v4l-utils
+EOF_VENDOR_GPU
+    else
+        cp -f "${src}" "${tmp}"
+    fi
+
+    ${SUDO} cp "${tmp}" "${ROOTFS_DIR}/tmp/packages-minimal.txt"
+    rm -f "${tmp}"
+}
+
 ${SUDO} mount --bind /dev "${ROOTFS_DIR}/dev"
 ${SUDO} mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
 ${SUDO} mount -t proc proc "${ROOTFS_DIR}/proc"
 ${SUDO} mount -t sysfs sysfs "${ROOTFS_DIR}/sys"
 
-${SUDO} cp "${REPO_DIR}/rootfs/${DIST}/packages-minimal.txt" "${ROOTFS_DIR}/tmp/packages-minimal.txt"
+write_minimal_package_list
 if [ "${IMAGE_TYPE}" = "server" ]; then
     ${SUDO} cp "${REPO_DIR}/rootfs/${DIST}/packages-server.txt" "${ROOTFS_DIR}/tmp/packages-server.txt"
 else
