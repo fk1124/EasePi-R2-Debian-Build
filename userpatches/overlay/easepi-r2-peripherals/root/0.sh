@@ -11,17 +11,228 @@ install -d /usr/local/sbin /etc/systemd/system /etc/systemd/network
 
 cat > /usr/local/sbin/easepi-r2-eth-order <<'ETH_ORDER'
 #!/usr/bin/env bash
+# Align EasePi-R2 physical port order to kernel interface names without relying
+# on systemd-networkd/NetworkManager.  It reads /proc/device-tree/eth_order and
+# waits for all four target PCIe NICs before doing a two-stage rename.  This
+# avoids first-boot partial renames when PCIe/r8169 coldplug is slower than the
+# network stack.
 set -u
+
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 DEFAULT_ORDER="0004:41:00.0,0002:21:00.0,0001:11:00.0,0003:31:00.0"
 TMP_PREFIX="r2tmp"
 LOG_TAG="easepi-r2-eth-order"
-log(){ echo "[$LOG_TAG] $*"; command -v logger >/dev/null 2>&1 && logger -t "$LOG_TAG" -- "$*" || true; }
-read_order(){ local order=""; if [ -r /proc/device-tree/eth_order ]; then order="$(tr -d '\000' < /proc/device-tree/eth_order 2>/dev/null | tr -d '[:space:]')"; fi; [ -n "$order" ] || order="$DEFAULT_ORDER"; printf '%s\n' "$order"; }
-iface_for_bdf(){ local bdf="$1" p i dev; for p in /sys/class/net/*; do [ -e "$p" ] || continue; i="${p##*/}"; [ "$i" = lo ] && continue; dev="$(readlink -f "$p/device" 2>/dev/null || true)"; case "$dev" in *"/$bdf") printf '%s\n' "$i"; return 0;; esac; done; return 1; }
-iface_exists(){ [ -e "/sys/class/net/$1" ]; }
-rename_iface(){ local old="$1" new="$2"; [ -n "$old" ] && [ -n "$new" ] || return 1; [ "$old" = "$new" ] && return 0; iface_exists "$old" || { log "skip: $old not found while renaming to $new"; return 1; }; log "rename $old -> $new"; ip link set dev "$old" down 2>/dev/null || true; ip link set dev "$old" name "$new"; }
-main(){ command -v ip >/dev/null 2>&1 || { log "ip command not found"; exit 0; }; local order i bdf cur target tmp all_ok=1; order="$(read_order)"; log "eth_order=$order"; IFS=',' read -r -a bdfs <<< "$order"; if [ "${#bdfs[@]}" -lt 4 ]; then log "bad eth_order; fallback to $DEFAULT_ORDER"; IFS=',' read -r -a bdfs <<< "$DEFAULT_ORDER"; fi; for i in 0 1 2 3; do bdf="${bdfs[$i]}"; target="eth$i"; cur="$(iface_for_bdf "$bdf" || true)"; [ "$cur" = "$target" ] || all_ok=0; done; [ "$all_ok" = 1 ] && { log "port order already aligned"; exit 0; }; for i in 0 1 2 3; do bdf="${bdfs[$i]}"; tmp="${TMP_PREFIX}${i}"; cur="$(iface_for_bdf "$bdf" || true)"; [ -n "$cur" ] || { log "missing device for $bdf"; continue; }; [ "$cur" = "$tmp" ] || rename_iface "$cur" "$tmp" || true; done; for i in 0 1 2 3; do bdf="${bdfs[$i]}"; target="eth$i"; cur="$(iface_for_bdf "$bdf" || true)"; [ -n "$cur" ] || { log "missing device for $bdf; final $target not created"; continue; }; if [ "$cur" != "$target" ]; then iface_exists "$target" && rename_iface "$target" "${TMP_PREFIX}hold${i}" || true; rename_iface "$cur" "$target" || true; fi; done; for i in 0 1 2 3; do iface_exists "eth$i" && log "eth$i -> $(readlink -f "/sys/class/net/eth$i/device" 2>/dev/null || echo unknown)" || log "eth$i missing after alignment"; done; }
+WAIT_TIMEOUT="${EASEPI_R2_ETH_ORDER_WAIT_TIMEOUT:-60}"
+WAIT_INTERVAL="${EASEPI_R2_ETH_ORDER_WAIT_INTERVAL:-1}"
+RENAME_ATTEMPTS="${EASEPI_R2_ETH_ORDER_RENAME_ATTEMPTS:-3}"
+BDFS=()
+
+log() {
+  echo "[$LOG_TAG] $*"
+  command -v logger >/dev/null 2>&1 && logger -t "$LOG_TAG" -- "$*" || true
+}
+
+read_order() {
+  local order=""
+  if [ -r /proc/device-tree/eth_order ]; then
+    order="$(tr -d '\000' < /proc/device-tree/eth_order 2>/dev/null | tr -d '[:space:]')"
+  fi
+  [ -n "$order" ] || order="$DEFAULT_ORDER"
+  printf '%s\n' "$order"
+}
+
+iface_for_bdf() {
+  local bdf="$1" p i dev
+  if [ -d "/sys/bus/pci/devices/$bdf/net" ]; then
+    for p in "/sys/bus/pci/devices/$bdf"/net/*; do
+      [ -e "$p" ] || continue
+      printf '%s\n' "${p##*/}"
+      return 0
+    done
+  fi
+
+  for p in /sys/class/net/*; do
+    [ -e "$p" ] || continue
+    i="${p##*/}"
+    [ "$i" = "lo" ] && continue
+    dev="$(readlink -f "$p/device" 2>/dev/null || true)"
+    case "$dev" in
+      *"/$bdf") printf '%s\n' "$i"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+iface_bdf() {
+  local iface="$1" dev
+  dev="$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)"
+  [ -n "$dev" ] || return 1
+  printf '%s\n' "${dev##*/}"
+}
+
+iface_exists() {
+  [ -e "/sys/class/net/$1" ]
+}
+
+unique_iface_name() {
+  local base="$1" name="$1" n=0
+  while iface_exists "$name"; do
+    n=$((n + 1))
+    name="${base}${n}"
+  done
+  printf '%s\n' "$name"
+}
+
+rename_iface() {
+  local old="$1" new="$2"
+  [ -n "$old" ] && [ -n "$new" ] || return 1
+  [ "$old" = "$new" ] && return 0
+  iface_exists "$old" || { log "skip: $old not found while renaming to $new"; return 1; }
+
+  log "rename $old -> $new"
+  ip link set dev "$old" down 2>/dev/null || true
+  ip link set dev "$old" name "$new"
+}
+
+report_alignment() {
+  local i bdf target cur
+  for i in 0 1 2 3; do
+    bdf="${BDFS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_bdf "$bdf" || true)"
+    if [ -n "$cur" ]; then
+      log "$bdf -> $cur (target $target)"
+    else
+      log "$bdf -> missing (target $target)"
+    fi
+  done
+}
+
+wait_for_all_devices() {
+  local deadline missing i bdf cur
+  deadline=$((SECONDS + WAIT_TIMEOUT))
+
+  while :; do
+    missing=""
+    for i in 0 1 2 3; do
+      bdf="${BDFS[$i]}"
+      cur="$(iface_for_bdf "$bdf" || true)"
+      [ -n "$cur" ] || missing="${missing}${missing:+ }$bdf"
+    done
+
+    if [ -z "$missing" ]; then
+      log "all target RTL8125 interfaces are present"
+      return 0
+    fi
+
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      log "timeout waiting for target interfaces; missing: $missing"
+      report_alignment
+      return 1
+    fi
+
+    log "waiting for target interfaces; missing: $missing"
+    command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    sleep "$WAIT_INTERVAL"
+  done
+}
+
+verify_alignment() {
+  local i bdf target cur ok=1
+  for i in 0 1 2 3; do
+    bdf="${BDFS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_bdf "$bdf" || true)"
+    if [ "$cur" = "$target" ]; then
+      log "verified $target -> $(readlink -f "/sys/class/net/$target/device" 2>/dev/null || echo unknown)"
+    else
+      log "verify failed for $bdf: current=${cur:-missing}, target=$target"
+      ok=0
+    fi
+  done
+  [ "$ok" = "1" ]
+}
+
+align_once() {
+  local i bdf cur target tmp tmp_bdf hold
+
+  # Stage 1: move every target device to a unique temporary name.  Do not run
+  # this unless wait_for_all_devices has confirmed all four target NICs exist.
+  for i in 0 1 2 3; do
+    bdf="${BDFS[$i]}"
+    tmp="${TMP_PREFIX}${i}"
+    cur="$(iface_for_bdf "$bdf" || true)"
+    if [ "$cur" != "$tmp" ]; then
+      if iface_exists "$tmp"; then
+        tmp_bdf="$(iface_bdf "$tmp" || true)"
+        if [ "$tmp_bdf" != "$bdf" ]; then
+          rename_iface "$tmp" "$(unique_iface_name "${TMP_PREFIX}x${i}")" || return 1
+        fi
+      fi
+      rename_iface "$cur" "$tmp" || return 1
+    fi
+  done
+
+  # Stage 2: move temporary names to final eth0-eth3.
+  for i in 0 1 2 3; do
+    bdf="${BDFS[$i]}"
+    target="eth$i"
+    cur="$(iface_for_bdf "$bdf" || true)"
+    if [ "$cur" != "$target" ]; then
+      if iface_exists "$target"; then
+        hold="$(unique_iface_name "${TMP_PREFIX}hold${i}")"
+        log "target $target still exists before final rename; move it aside as $hold"
+        rename_iface "$target" "$hold" || return 1
+      fi
+      rename_iface "$cur" "$target" || return 1
+    fi
+  done
+
+  verify_alignment
+}
+
+main() {
+  if ! command -v ip >/dev/null 2>&1; then
+    log "ip command not found; cannot align port names"
+    exit 0
+  fi
+
+  local order i attempt all_ok=1
+  order="$(read_order)"
+  log "eth_order=$order"
+
+  IFS=',' read -r -a BDFS <<< "$order"
+  if [ "${#BDFS[@]}" -lt 4 ]; then
+    log "eth_order has less than 4 entries; fallback to $DEFAULT_ORDER"
+    IFS=',' read -r -a BDFS <<< "$DEFAULT_ORDER"
+  fi
+
+  # Quick path: already correct.
+  for i in 0 1 2 3; do
+    if [ "$(iface_for_bdf "${BDFS[$i]}" || true)" != "eth$i" ]; then
+      all_ok=0
+    fi
+  done
+  if [ "$all_ok" = "1" ]; then
+    log "port order already aligned; nothing to do"
+    exit 0
+  fi
+
+  for attempt in $(seq 1 "$RENAME_ATTEMPTS"); do
+    log "alignment attempt $attempt/$RENAME_ATTEMPTS"
+    if wait_for_all_devices && align_once; then
+      log "port order aligned successfully"
+      exit 0
+    fi
+    log "alignment attempt $attempt failed"
+    sleep 1
+  done
+
+  log "failed to align port order"
+  report_alignment
+  exit 1
+}
+
 main "$@"
 ETH_ORDER
 chmod +x /usr/local/sbin/easepi-r2-eth-order
@@ -30,15 +241,20 @@ cat > /etc/systemd/system/easepi-r2-eth-order.service <<'ETH_ORDER_SERVICE'
 [Unit]
 Description=EasePi-R2 align RTL8125 interface names from device-tree eth_order
 DefaultDependencies=no
-Wants=systemd-udev-settle.service
-After=local-fs.target systemd-udevd.service systemd-udev-settle.service
+Wants=systemd-udev-trigger.service systemd-udev-settle.service network-pre.target
+After=local-fs.target systemd-udevd.service systemd-udev-trigger.service systemd-udev-settle.service
 Before=network-pre.target network.target systemd-networkd.service NetworkManager.service networking.service dnsmasq.service nftables.service
 ConditionPathExists=/sys/class/net
+StartLimitIntervalSec=180
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/easepi-r2-eth-order
 RemainAfterExit=yes
+TimeoutStartSec=90
+Restart=on-failure
+RestartSec=3
 
 [Install]
 WantedBy=sysinit.target
