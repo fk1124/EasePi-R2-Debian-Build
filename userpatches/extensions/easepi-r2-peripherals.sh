@@ -44,6 +44,25 @@ function pre_customize_image__copy_easepi_r2_peripheral_files() {
 	fi
 }
 
+function easepi_r2_fix_brcm_firmware_aliases() {
+	local FW_DIR="${SDCARD}/lib/firmware/brcm"
+	local BT_PATCH="BCM4345C0_003.001.025.0162.0000_Generic_UART_37_4MHz_wlbga_ref_iLNA_iTR_eLG.hcd"
+
+	[[ -d "${FW_DIR}" ]] || return 0
+
+	if [[ -f "${FW_DIR}/${BT_PATCH}" ]]; then
+		ln -sfn "${BT_PATCH}" "${FW_DIR}/BCM4345C0.linkease,easepi-r2.hcd"
+		ln -sfn "${BT_PATCH}" "${FW_DIR}/BCM4345C0.hcd"
+	fi
+
+	[[ -f "${FW_DIR}/brcmfmac43455-sdio.bin" ]] && \
+		ln -sfn "brcmfmac43455-sdio.bin" "${FW_DIR}/brcmfmac43455-sdio.linkease,easepi-r2.bin"
+	[[ -f "${FW_DIR}/brcmfmac43455-sdio.txt" ]] && \
+		ln -sfn "brcmfmac43455-sdio.txt" "${FW_DIR}/brcmfmac43455-sdio.linkease,easepi-r2.txt"
+	[[ -f "${FW_DIR}/brcmfmac43455-sdio.clm_blob" ]] && \
+		ln -sfn "brcmfmac43455-sdio.clm_blob" "${FW_DIR}/brcmfmac43455-sdio.linkease,easepi-r2.clm_blob"
+}
+
 function post_customize_image__enable_easepi_r2_peripheral_services() {
 	display_alert "EasePi-R2" "Enabling peripheral services" "info"
 
@@ -67,10 +86,15 @@ function post_customize_image__enable_easepi_r2_peripheral_services() {
 		iproute2 iputils-ping ethtool bridge-utils \
 		dnsmasq nftables iptables \
 		ppp pppoe curl ca-certificates \
-		wpasupplicant hostapd || true
+		wpasupplicant hostapd \
+		rfkill bluetooth bluez bluez-tools \
+		libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri \
+		mesa-vulkan-drivers mesa-utils vulkan-tools \
+		kmscube glmark2-es2-drm v4l-utils || true
 	if [[ -f "${R2_NFT_BACKUP}" ]]; then
 		mv "${R2_NFT_BACKUP}" "${SDCARD}/etc/nftables.conf"
 	fi
+	easepi_r2_fix_brcm_firmware_aliases
 
 	if [[ -f "${SDCARD}/etc/systemd/system/ir-keymap.service" ]]; then
 		chroot_sdcard systemctl enable ir-keymap.service || true

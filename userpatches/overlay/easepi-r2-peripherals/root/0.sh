@@ -1356,7 +1356,22 @@ install_deps(){
   apt-get install -y \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
-    iproute2 ethtool dnsmasq nftables ppp pppoe curl ca-certificates bridge-utils wpasupplicant hostapd || true
+    iproute2 ethtool dnsmasq nftables ppp pppoe curl ca-certificates bridge-utils wpasupplicant hostapd \
+    rfkill bluetooth bluez bluez-tools \
+    libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri \
+    mesa-vulkan-drivers mesa-utils vulkan-tools \
+    kmscube glmark2-es2-drm v4l-utils || true
+  FW_DIR="/lib/firmware/brcm"
+  BT_PATCH="BCM4345C0_003.001.025.0162.0000_Generic_UART_37_4MHz_wlbga_ref_iLNA_iTR_eLG.hcd"
+  if [ -d "$FW_DIR" ]; then
+    if [ -f "$FW_DIR/$BT_PATCH" ]; then
+      ln -sfn "$BT_PATCH" "$FW_DIR/BCM4345C0.linkease,easepi-r2.hcd"
+      ln -sfn "$BT_PATCH" "$FW_DIR/BCM4345C0.hcd"
+    fi
+    [ -f "$FW_DIR/brcmfmac43455-sdio.bin" ] && ln -sfn brcmfmac43455-sdio.bin "$FW_DIR/brcmfmac43455-sdio.linkease,easepi-r2.bin"
+    [ -f "$FW_DIR/brcmfmac43455-sdio.txt" ] && ln -sfn brcmfmac43455-sdio.txt "$FW_DIR/brcmfmac43455-sdio.linkease,easepi-r2.txt"
+    [ -f "$FW_DIR/brcmfmac43455-sdio.clm_blob" ] && ln -sfn brcmfmac43455-sdio.clm_blob "$FW_DIR/brcmfmac43455-sdio.linkease,easepi-r2.clm_blob"
+  fi
   systemctl disable --now NetworkManager.service 2>/dev/null || true
   systemctl enable easepi-r2-eth-order.service systemd-networkd dnsmasq nftables 2>/dev/null || true
   systemctl disable systemd-networkd-wait-online.service 2>/dev/null || true

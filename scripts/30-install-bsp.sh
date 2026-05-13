@@ -174,10 +174,26 @@ if ! command -v dnsmasq >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1; the
   apt-get install -y --no-install-recommends \
     -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold \
-    iproute2 iputils-ping ethtool bridge-utils dnsmasq nftables iptables ppp pppoe curl ca-certificates wpasupplicant hostapd || true
+    iproute2 iputils-ping ethtool bridge-utils dnsmasq nftables iptables ppp pppoe curl ca-certificates wpasupplicant hostapd \
+    rfkill bluetooth bluez bluez-tools \
+    libdrm2 libegl-mesa0 libgles2 libgl1-mesa-dri \
+    mesa-vulkan-drivers mesa-utils vulkan-tools \
+    kmscube glmark2-es2-drm v4l-utils || true
   if [ -f "$NFT_BACKUP" ]; then
     mv "$NFT_BACKUP" /etc/nftables.conf
   fi
+fi
+
+FW_DIR="/lib/firmware/brcm"
+BT_PATCH="BCM4345C0_003.001.025.0162.0000_Generic_UART_37_4MHz_wlbga_ref_iLNA_iTR_eLG.hcd"
+if [ -d "$FW_DIR" ]; then
+  if [ -f "$FW_DIR/$BT_PATCH" ]; then
+    ln -sfn "$BT_PATCH" "$FW_DIR/BCM4345C0.linkease,easepi-r2.hcd"
+    ln -sfn "$BT_PATCH" "$FW_DIR/BCM4345C0.hcd"
+  fi
+  [ -f "$FW_DIR/brcmfmac43455-sdio.bin" ] && ln -sfn brcmfmac43455-sdio.bin "$FW_DIR/brcmfmac43455-sdio.linkease,easepi-r2.bin"
+  [ -f "$FW_DIR/brcmfmac43455-sdio.txt" ] && ln -sfn brcmfmac43455-sdio.txt "$FW_DIR/brcmfmac43455-sdio.linkease,easepi-r2.txt"
+  [ -f "$FW_DIR/brcmfmac43455-sdio.clm_blob" ] && ln -sfn brcmfmac43455-sdio.clm_blob "$FW_DIR/brcmfmac43455-sdio.linkease,easepi-r2.clm_blob"
 fi
 # EasePi-R2 is shipped as a router base: systemd-networkd owns the network.
 systemctl disable NetworkManager 2>/dev/null || true

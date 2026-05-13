@@ -6,6 +6,11 @@ BT_SPEED="${BT_SPEED:-1500000}"
 
 rfkill unblock bluetooth 2>/dev/null || true
 
+if [ -d /sys/class/bluetooth/hci0 ]; then
+    echo "Bluetooth HCI already present; kernel serdev owns ${TTY_DEV}."
+    exit 0
+fi
+
 modprobe hci_uart 2>/dev/null || true
 modprobe hci_uart_bcm 2>/dev/null || true
 modprobe btqca 2>/dev/null || true
