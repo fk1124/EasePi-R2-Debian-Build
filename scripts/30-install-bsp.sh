@@ -313,14 +313,26 @@ CHROOT_USER
 
 # Create boot environment. ROOT_UUID is replaced during image packing.
 ${SUDO} mkdir -p "${ROOTFS_DIR}/boot/extlinux"
-${SUDO} tee "${ROOTFS_DIR}/boot/armbianEnv.txt" >/dev/null <<'EOF_ENV'
+BOOTENV_EXTRAARGS="net.ifnames=1"
+BOOTENV_VENDOR_LINES=""
+if [ "${BRANCH}" = "vendor" ]; then
+    BOOTENV_EXTRAARGS="cma=256M net.ifnames=1"
+    BOOTENV_VENDOR_LINES="$(cat <<'EOF_VENDOR_BOOTENV'
+overlay_prefix=rockchip-rk3588
+usbstoragequirks=0x2537:0x1066:u,0x2537:0x1068:u
+EOF_VENDOR_BOOTENV
+)"
+fi
+
+${SUDO} tee "${ROOTFS_DIR}/boot/armbianEnv.txt" >/dev/null <<EOF_ENV
 verbosity=1
 bootlogo=false
 console=both
+${BOOTENV_VENDOR_LINES}
 fdtfile=rockchip/rk3588-easepi-r2.dtb
 rootdev=UUID=ROOT_UUID
 rootfstype=ext4
-extraargs=net.ifnames=1
+extraargs=${BOOTENV_EXTRAARGS}
 EOF_ENV
 
 # Prefer Armbian's official RK35xx boot script if the build tree is available.

@@ -112,6 +112,33 @@ function easepi_r2_fix_brcm_firmware_aliases() {
 		ln -sfn "brcmfmac43455-sdio.clm_blob" "${FW_DIR}/brcmfmac43455-sdio.linkease,easepi-r2.clm_blob"
 }
 
+function easepi_r2_tune_vendor_bootenv() {
+	[[ "${BRANCH:-current}" == "vendor" ]] || return 0
+
+	local env_file="${SDCARD}/boot/armbianEnv.txt"
+	local extraargs=""
+
+	[[ -f "${env_file}" ]] || return 0
+
+	extraargs="$(sed -n 's/^extraargs=//p' "${env_file}" | tail -1)"
+	case " ${extraargs} " in
+		*" cma=256M "*) ;;
+		*) extraargs="cma=256M${extraargs:+ ${extraargs}}" ;;
+	esac
+
+	sed -i \
+		-e '/^overlay_prefix=/d' \
+		-e '/^usbstoragequirks=/d' \
+		-e '/^extraargs=/d' \
+		"${env_file}"
+
+	cat >> "${env_file}" <<EOF_VENDOR_BOOTENV
+overlay_prefix=rockchip-rk3588
+usbstoragequirks=0x2537:0x1066:u,0x2537:0x1068:u
+extraargs=${extraargs}
+EOF_VENDOR_BOOTENV
+}
+
 function post_customize_image__enable_easepi_r2_peripheral_services() {
 	display_alert "EasePi-R2" "Enabling peripheral services" "info"
 
@@ -166,6 +193,7 @@ function post_customize_image__enable_easepi_r2_peripheral_services() {
 		rm -f "${SDCARD}/tmp/easepi-r2-libmali.deb"
 	fi
 	easepi_r2_fix_brcm_firmware_aliases
+	easepi_r2_tune_vendor_bootenv
 
 	if [[ -f "${SDCARD}/etc/systemd/system/ir-keymap.service" ]]; then
 		chroot_sdcard systemctl enable ir-keymap.service || true
