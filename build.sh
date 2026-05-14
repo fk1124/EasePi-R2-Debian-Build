@@ -435,6 +435,35 @@ prefetch_oras_tooling() {
     rm -rf "${tmp_dir}"
 }
 
+trust_existing_git_caches() {
+	if ! command -v git >/dev/null 2>&1; then
+		return 0
+	fi
+
+	local build_dir_safe
+	build_dir_safe="$(readlink -f "${BUILD_DIR}" 2>/dev/null || printf '%s' "${BUILD_DIR}")"
+
+	git config --global --add safe.directory "${BUILD_DIR}" 2>/dev/null || true
+	git config --global --add safe.directory "${build_dir_safe}" 2>/dev/null || true
+
+	local repo
+	if [ -d "${build_dir_safe}/cache/git-bare" ]; then
+		while IFS= read -r -d '' repo; do
+			git config --global --add safe.directory "${repo}" 2>/dev/null || true
+		done < <(find "${build_dir_safe}/cache/git-bare" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+	fi
+
+	if [ -d "${build_dir_safe}/cache/sources" ]; then
+		while IFS= read -r -d '' repo; do
+			git config --global --add safe.directory "${repo}" 2>/dev/null || true
+		done < <(
+			find "${build_dir_safe}/cache/sources" -mindepth 1 -maxdepth 5 \
+				\( -type d -name .git -printf '%h\0' -o -type f -name .git -printf '%h\0' \) \
+				2>/dev/null
+		)
+	fi
+}
+
 choose_mainline_mirror
 choose_uboot_mirror
 choose_github_source
@@ -472,6 +501,7 @@ export SKIP_ORAS=yes
 git config --global core.askPass '' 2>/dev/null || true
 git config --global credential.helper '' 2>/dev/null || true
 
+trust_existing_git_caches
 prefetch_oras_tooling
 
 BUILD_DESKTOP="no"

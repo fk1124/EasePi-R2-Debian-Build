@@ -1,0 +1,5 @@
+config:
+
+  overlay-directories:
+    - { source: "defconfig", target: "configs" }
+    - { source: "dt", target: "arch/arm/dts" }
