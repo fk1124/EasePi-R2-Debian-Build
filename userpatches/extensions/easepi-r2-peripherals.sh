@@ -6,6 +6,7 @@
 : "${EASEPI_R2_VENDOR_GPU_STACK:=libmali}"
 : "${EASEPI_R2_LIBMALI_DEB_URL:=https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb}"
 : "${EASEPI_R2_LIBMALI_DEB_SHA256:=32ffe853e8d56295284637252f1da15dd868a8f7c6b8da6b9f77616ba285eb1a}"
+: "${EASEPI_R2_VENDOR_HDMI_DEBUG:=no}"
 
 function extension_prepare_config__easepi_r2_peripherals() {
 	display_alert "Extension: EasePi-R2 Peripherals" "IR + Bluetooth + networkd router base" "info"
@@ -139,6 +140,61 @@ extraargs=${extraargs}
 EOF_VENDOR_BOOTENV
 }
 
+function easepi_r2_enable_vendor_hdmi_debug() {
+	[[ "${BRANCH:-current}" == "vendor" ]] || return 0
+	[[ "${EASEPI_R2_VENDOR_HDMI_DEBUG}" == "yes" ]] || return 0
+
+	local env_file="${SDCARD}/boot/armbianEnv.txt"
+	local boot_cmd="${SDCARD}/boot/boot.cmd"
+	local boot_scr="${SDCARD}/boot/boot.scr"
+	local extraargs=""
+	local arg=""
+
+	[[ -f "${env_file}" ]] || return 0
+	display_alert "EasePi-R2" "Enabling vendor HDMI debug console" "info"
+
+	extraargs="$(sed -n 's/^extraargs=//p' "${env_file}" | tail -1)"
+	for arg in \
+		ignore_loglevel \
+		no_console_suspend \
+		log_buf_len=4M \
+		systemd.log_level=debug \
+		systemd.log_target=console \
+		fbcon=nodefer \
+		plymouth.enable=0
+	do
+		case " ${extraargs} " in
+			*" ${arg} "*) ;;
+			*) extraargs="${extraargs:+${extraargs} }${arg}" ;;
+		esac
+	done
+
+	sed -i \
+		-e 's/^verbosity=.*/verbosity=7/' \
+		-e 's/^console=.*/console=both/' \
+		-e 's/^bootlogo=.*/bootlogo=false/' \
+		-e '/^stdin=/d' \
+		-e '/^stdout=/d' \
+		-e '/^stderr=/d' \
+		-e '/^extraargs=/d' \
+		"${env_file}"
+
+	cat >> "${env_file}" <<EOF_VENDOR_HDMI_DEBUG
+stdin=serial,usbkbd
+stdout=serial,vidconsole
+stderr=serial,vidconsole
+extraargs=${extraargs}
+EOF_VENDOR_HDMI_DEBUG
+
+	if [[ -f "${boot_cmd}" && -x "$(command -v mkimage)" ]]; then
+		sed -i \
+			-e 's/setenv consoleargs "splash plymouth.ignore-serial-consoles ${consoleargs}"/setenv consoleargs "${consoleargs}"/' \
+			-e 's/setenv consoleargs "splash=verbose ${consoleargs}"/setenv consoleargs "${consoleargs}"/' \
+			"${boot_cmd}"
+		mkimage -C none -A arm -T script -d "${boot_cmd}" "${boot_scr}" >/dev/null
+	fi
+}
+
 function post_customize_image__enable_easepi_r2_peripheral_services() {
 	display_alert "EasePi-R2" "Enabling peripheral services" "info"
 
@@ -194,6 +250,7 @@ function post_customize_image__enable_easepi_r2_peripheral_services() {
 	fi
 	easepi_r2_fix_brcm_firmware_aliases
 	easepi_r2_tune_vendor_bootenv
+	easepi_r2_enable_vendor_hdmi_debug
 
 	if [[ -f "${SDCARD}/etc/systemd/system/ir-keymap.service" ]]; then
 		chroot_sdcard systemctl enable ir-keymap.service || true

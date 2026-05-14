@@ -58,6 +58,65 @@ msg() {
     printf '%s\n' "$*"
 }
 
+append_csv_value() {
+    local csv="${1-}"
+    local value="$2"
+
+    case ",${csv}," in
+        *,"${value}",*)
+            printf '%s\n' "${csv}"
+            return 0
+            ;;
+    esac
+
+    if [ -z "${csv}" ]; then
+        printf '%s\n' "${value}"
+    else
+        printf '%s,%s\n' "${csv}" "${value}"
+    fi
+}
+
+remove_matching_files() {
+    local pattern file removed=0
+
+    shopt -s nullglob
+    for pattern in "$@"; do
+        for file in ${pattern}; do
+            rm -f "${file}"
+            msg "Removed stale artifact: ${file}"
+            removed=1
+        done
+    done
+    shopt -u nullglob
+
+    return "${removed}"
+}
+
+prepare_vendor_clean_build() {
+    [ "${BRANCH}" = "vendor" ] || return 0
+    [ "${EASEPI_R2_VENDOR_CLEAN_BUILD:-yes}" = "yes" ] || {
+        msg "Vendor clean rebuild disabled by EASEPI_R2_VENDOR_CLEAN_BUILD=${EASEPI_R2_VENDOR_CLEAN_BUILD:-no}"
+        return 0
+    }
+
+    msg
+    msg "Vendor branch: forcing clean kernel/u-boot/BSP rebuild to avoid stale local deb reuse."
+
+    CLEAN_LEVEL="$(append_csv_value "${CLEAN_LEVEL-}" "make-kernel")"
+    CLEAN_LEVEL="$(append_csv_value "${CLEAN_LEVEL}" "make-uboot")"
+
+    remove_matching_files \
+        "${BUILD_DIR}/output/debs/linux-image-vendor-rk35xx_"*.deb \
+        "${BUILD_DIR}/output/debs/linux-dtb-vendor-rk35xx_"*.deb \
+        "${BUILD_DIR}/output/debs/linux-headers-vendor-rk35xx_"*.deb \
+        "${BUILD_DIR}/output/debs/linux-libc-dev-vendor-rk35xx_"*.deb \
+        "${BUILD_DIR}/output/debs/linux-u-boot-${BOARD}-vendor_"*.deb \
+        "${BUILD_DIR}/output/debs/armbian-bsp-cli-${BOARD}-vendor_"*.deb \
+        "${BUILD_DIR}/output/packages-hashed/kernel-rk35xx-vendor_"*.tar \
+        "${BUILD_DIR}/output/packages-hashed/linux-u-boot-${BOARD}-vendor_"*.deb \
+        "${BUILD_DIR}/output/packages-hashed/armbian-bsp-cli-${BOARD}-vendor_"*.tar || true
+}
+
 install_pv_cat_wrapper() {
     local wrapper_dir
     wrapper_dir="$(mktemp -d "${TMPDIR:-/tmp}/easepi-r2-pv.XXXXXX")"
@@ -490,6 +549,7 @@ fi
 choose_mainline_mirror
 choose_uboot_mirror
 choose_github_source
+prepare_vendor_clean_build
 
 printf '\n[1/4] Build EasePi-R2 BSP with Armbian build framework\n'
 printf 'Build directory : %s\n' "${BUILD_DIR}"
@@ -505,8 +565,9 @@ printf 'U-Boot mirror   : %s\n' "${UBOOT_MIRROR}"
 printf 'GitHub mirror   : %s\n' "${GITHUB_MIRROR:-direct}"
 printf 'GitHub source   : %s\n' "${GITHUB_SOURCE}"
 printf 'Threads         : %s\n' "${CPUTHREADS}"
+printf 'Clean level     : %s\n' "${CLEAN_LEVEL:-default}"
 
-rsync -a "${REPO_DIR}/userpatches/" "${BUILD_DIR}/userpatches/"
+rsync -a --delete "${REPO_DIR}/userpatches/" "${BUILD_DIR}/userpatches/"
 
 cd "${BUILD_DIR}"
 
@@ -563,6 +624,10 @@ fi
 
 if [ -n "${MAINLINE_MIRROR}" ]; then
     COMPILE_ARGS+=("MAINLINE_MIRROR=${MAINLINE_MIRROR}")
+fi
+
+if [ -n "${CLEAN_LEVEL:-}" ]; then
+    COMPILE_ARGS+=("CLEAN_LEVEL=${CLEAN_LEVEL}")
 fi
 
 PV_WRAPPER_DIR=""

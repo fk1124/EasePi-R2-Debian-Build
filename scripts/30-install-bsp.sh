@@ -23,6 +23,7 @@ TARGET_HOSTNAME="${TARGET_HOSTNAME:-easepi-r2}"
 EASEPI_R2_VENDOR_GPU_STACK="${EASEPI_R2_VENDOR_GPU_STACK:-libmali}"
 EASEPI_R2_LIBMALI_DEB_URL="${EASEPI_R2_LIBMALI_DEB_URL:-https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-20260312-bd33ee2/libmali-valhall-g610-g24p0-gbm_1.9-1_arm64.deb}"
 EASEPI_R2_LIBMALI_DEB_SHA256="${EASEPI_R2_LIBMALI_DEB_SHA256:-32ffe853e8d56295284637252f1da15dd868a8f7c6b8da6b9f77616ba285eb1a}"
+EASEPI_R2_VENDOR_HDMI_DEBUG="${EASEPI_R2_VENDOR_HDMI_DEBUG:-no}"
 
 printf '\n[3/4] Install EasePi-R2 kernel / DTB / boot files into rootfs\n'
 
@@ -335,6 +336,63 @@ rootfstype=ext4
 extraargs=${BOOTENV_EXTRAARGS}
 EOF_ENV
 
+enable_vendor_hdmi_debug() {
+    [ "${BRANCH}" = "vendor" ] || return 0
+    [ "${EASEPI_R2_VENDOR_HDMI_DEBUG}" = "yes" ] || return 0
+
+    local env_file="${ROOTFS_DIR}/boot/armbianEnv.txt"
+    local boot_cmd="${ROOTFS_DIR}/boot/boot.cmd"
+    local boot_scr="${ROOTFS_DIR}/boot/boot.scr"
+    local extraargs=""
+    local arg=""
+
+    [ -f "${env_file}" ] || return 0
+    printf 'Enabling vendor HDMI debug console.\n'
+
+    extraargs="$(sed -n 's/^extraargs=//p' "${env_file}" | tail -1)"
+    for arg in \
+        ignore_loglevel \
+        no_console_suspend \
+        log_buf_len=4M \
+        systemd.log_level=debug \
+        systemd.log_target=console \
+        fbcon=nodefer \
+        plymouth.enable=0
+    do
+        case " ${extraargs} " in
+            *" ${arg} "*) ;;
+            *) extraargs="${extraargs:+${extraargs} }${arg}" ;;
+        esac
+    done
+
+    ${SUDO} sed -i \
+      -e 's/^verbosity=.*/verbosity=7/' \
+      -e 's/^console=.*/console=both/' \
+      -e 's/^bootlogo=.*/bootlogo=false/' \
+      -e '/^stdin=/d' \
+      -e '/^stdout=/d' \
+      -e '/^stderr=/d' \
+      -e '/^extraargs=/d' \
+      "${env_file}"
+
+    ${SUDO} tee -a "${env_file}" >/dev/null <<EOF_VENDOR_HDMI_DEBUG
+stdin=serial,usbkbd
+stdout=serial,vidconsole
+stderr=serial,vidconsole
+extraargs=${extraargs}
+EOF_VENDOR_HDMI_DEBUG
+
+    if [ -f "${boot_cmd}" ]; then
+        ${SUDO} sed -i \
+          -e 's/setenv consoleargs "splash plymouth.ignore-serial-consoles ${consoleargs}"/setenv consoleargs "${consoleargs}"/' \
+          -e 's/setenv consoleargs "splash=verbose ${consoleargs}"/setenv consoleargs "${consoleargs}"/' \
+          "${boot_cmd}"
+        ${SUDO} mkimage -C none -A arm -T script \
+          -d "${boot_cmd}" \
+          "${boot_scr}" >/dev/null
+    fi
+}
+
 # Prefer Armbian's official RK35xx boot script if the build tree is available.
 BOOT_CMD_SRC=""
 if [ -n "${ARMBIAN_BUILD_DIR:-}" ] && [ -f "${ARMBIAN_BUILD_DIR}/config/bootscripts/boot-rk35xx.cmd" ]; then
@@ -417,5 +475,7 @@ if [ ! -e "${ROOTFS_DIR}/boot/boot.scr" ] && [ ! -e "${ROOTFS_DIR}/boot/extlinux
     echo "ERROR: missing boot loader config: /boot/boot.scr or /boot/extlinux/extlinux.conf"
     exit 1
 fi
+
+enable_vendor_hdmi_debug
 
 printf 'BSP installed into rootfs.\n'
