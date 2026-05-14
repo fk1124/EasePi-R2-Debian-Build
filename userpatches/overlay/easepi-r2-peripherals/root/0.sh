@@ -708,12 +708,16 @@ Wants=systemd-udev-trigger.service systemd-udev-settle.service network-pre.targe
 After=local-fs.target systemd-udevd.service systemd-udev-trigger.service systemd-udev-settle.service
 Before=network-pre.target network.target systemd-networkd.service NetworkManager.service networking.service dnsmasq.service nftables.service
 ConditionPathExists=/sys/class/net
+StartLimitIntervalSec=45
+StartLimitBurst=2
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/easepi-r2-eth-order
 RemainAfterExit=yes
 TimeoutStartSec=30
+Restart=on-failure
+RestartSec=1
 
 [Install]
 WantedBy=sysinit.target

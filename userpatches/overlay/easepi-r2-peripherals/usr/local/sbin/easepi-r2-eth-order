@@ -119,6 +119,114 @@ rename_iface() {
   ip link set dev "$old" name "$new"
 }
 
+settle_udev() {
+  local timeout="${1:-3}"
+  command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout="$timeout" >/dev/null 2>&1 || true
+}
+
+iface_driver() {
+  local iface="$1" driver
+  driver="$(readlink -f "/sys/class/net/$iface/device/driver" 2>/dev/null || true)"
+  [ -n "$driver" ] || return 1
+  printf '%s\n' "${driver##*/}"
+}
+
+iface_is_usb_net() {
+  local iface="$1" dev driver
+  dev="$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)"
+  driver="$(iface_driver "$iface" || true)"
+
+  case "$driver" in
+    rndis_host|cdc_ether|cdc_ncm|cdc_mbim|qmi_wwan) return 0 ;;
+  esac
+
+  case "$dev" in
+    */usb*/*) return 0 ;;
+  esac
+
+  return 1
+}
+
+relocate_target_blocker() {
+  local target="$1" selector="$2" slot="$3" blocker_selector driver hold
+
+  iface_exists "$target" || return 0
+
+  blocker_selector="$(selector_for_iface "$target" || true)"
+  if [ "$blocker_selector" = "$selector" ]; then
+    return 0
+  fi
+
+  if [ -n "$blocker_selector" ]; then
+    hold="$(unique_iface_name "${TMP_PREFIX}hold${slot}")"
+    log "target $target belongs to another RTL8125 selector $blocker_selector; move it aside as $hold"
+    rename_iface "$target" "$hold"
+    return $?
+  fi
+
+  driver="$(iface_driver "$target" || true)"
+  if iface_is_usb_net "$target"; then
+    if iface_exists lte4g && [ "$target" != "lte4g" ]; then
+      hold="$(unique_iface_name "${TMP_PREFIX}usb${slot}")"
+    else
+      hold="lte4g"
+    fi
+    log "target $target is occupied by USB net ${driver:-unknown}; move it aside as $hold"
+    rename_iface "$target" "$hold"
+    return $?
+  fi
+
+  hold="$(unique_iface_name "${TMP_PREFIX}hold${slot}")"
+  log "target $target is occupied by non-target netdev ${driver:-unknown}; move it aside as $hold"
+  rename_iface "$target" "$hold"
+}
+
+rename_final_iface() {
+  local old="$1" target="$2" selector="$3" slot="$4" attempt rc cur_owner
+
+  [ -n "$old" ] && [ -n "$target" ] || return 1
+  [ "$old" = "$target" ] && return 0
+
+  for attempt in 1 2 3 4 5; do
+    if iface_exists "$target"; then
+      cur_owner="$(selector_for_iface "$target" || true)"
+      if [ "$cur_owner" = "$selector" ]; then
+        log "$target already belongs to selector $selector"
+        return 0
+      fi
+
+      log "target $target is busy before final rename; wait for udev-settle (attempt $attempt)"
+      settle_udev 3
+      if iface_exists "$target"; then
+        relocate_target_blocker "$target" "$selector" "$slot" || return 1
+      fi
+    fi
+
+    if [ -z "$old" ] || ! iface_exists "$old"; then
+      old="$(iface_for_selector "$selector" || true)"
+    fi
+    [ -n "$old" ] && iface_exists "$old" || {
+      log "skip: selector $selector not found while renaming to $target"
+      return 1
+    }
+
+    log "rename $old -> $target"
+    ip link set dev "$old" down 2>/dev/null || true
+    if ip link set dev "$old" name "$target"; then
+      return 0
+    else
+      rc=$?
+    fi
+
+    log "rename $old -> $target failed (rc=$rc); retry after udev-settle"
+    settle_udev 3
+    sleep 1
+  done
+
+  log "failed to rename selector $selector to $target"
+  return 1
+}
+
 report_alignment() {
   local i selector target cur dev
   for i in 0 1 2 3; do
@@ -158,7 +266,7 @@ wait_for_all_devices() {
     fi
 
     log "waiting for target interfaces; missing: $missing"
-    command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    settle_udev 5
     sleep "$WAIT_INTERVAL"
   done
 }
@@ -180,7 +288,7 @@ verify_alignment() {
 }
 
 align_once() {
-  local i selector cur target tmp tmp_selector hold
+  local i selector cur target tmp tmp_selector
 
   # Stage 1: move every target device to a unique temporary name.  Do not run
   # this unless wait_for_all_devices has confirmed all four target NICs exist.
@@ -205,12 +313,7 @@ align_once() {
     target="eth$i"
     cur="$(iface_for_selector "$selector" || true)"
     if [ "$cur" != "$target" ]; then
-      if iface_exists "$target"; then
-        hold="$(unique_iface_name "${TMP_PREFIX}hold${i}")"
-        log "target $target still exists before final rename; move it aside as $hold"
-        rename_iface "$target" "$hold" || return 1
-      fi
-      rename_iface "$cur" "$target" || return 1
+      rename_final_iface "$cur" "$target" "$selector" "$i" || return 1
     fi
   done
 
