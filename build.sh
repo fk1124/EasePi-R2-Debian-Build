@@ -8,21 +8,28 @@ BOARD="${BOARD:-easepi-r2}"
 BRANCH="${1:-current}"
 RELEASE="${2:-trixie}"
 IMAGE_TYPE="${3:-minimal}"
+ARMBIAN_BRANCH="${ARMBIAN_BRANCH:-${BRANCH}}"
+EASEPI_R2_KERNEL_PROFILE="${EASEPI_R2_KERNEL_PROFILE:-}"
 
 case "${BRANCH}" in
-    current|edge|vendor) ;;
+    current|edge|vendor|linux7) ;;
     *)
         echo "ERROR: unsupported BRANCH: ${BRANCH}"
-        echo "Usage: bash build.sh [current|edge|vendor] [trixie|bookworm] [minimal|server|desktop]"
+        echo "Usage: bash build.sh [current|edge|vendor|linux7] [trixie|bookworm] [minimal|server|desktop]"
         exit 1
         ;;
 esac
+
+if [ "${BRANCH}" = "linux7" ]; then
+    ARMBIAN_BRANCH="edge"
+    EASEPI_R2_KERNEL_PROFILE="linux7"
+fi
 
 case "${RELEASE}" in
     trixie|bookworm) ;;
     *)
         echo "ERROR: unsupported RELEASE: ${RELEASE}"
-        echo "Usage: bash build.sh [current|edge|vendor] [trixie|bookworm] [minimal|server|desktop]"
+        echo "Usage: bash build.sh [current|edge|vendor|linux7] [trixie|bookworm] [minimal|server|desktop]"
         exit 1
         ;;
 esac
@@ -31,7 +38,7 @@ case "${IMAGE_TYPE}" in
     minimal|server|desktop) ;;
     *)
         echo "ERROR: unsupported IMAGE_TYPE: ${IMAGE_TYPE}"
-        echo "Usage: bash build.sh [current|edge|vendor] [trixie|bookworm] [minimal|server|desktop]"
+        echo "Usage: bash build.sh [current|edge|vendor|linux7] [trixie|bookworm] [minimal|server|desktop]"
         exit 1
         ;;
 esac
@@ -46,6 +53,7 @@ if [ ! -f "${BUILD_DIR}/compile.sh" ]; then
     echo
     echo "Or specify manually:"
     echo "  ARMBIAN_BUILD_DIR=/path/to/build bash build.sh current trixie minimal"
+    echo "  ARMBIAN_BUILD_DIR=/path/to/build bash build.sh linux7 trixie minimal"
     exit 1
 fi
 
@@ -438,6 +446,8 @@ printf '============================================\n'
 printf 'Build directory : %s\n' "${BUILD_DIR}"
 printf 'Board           : %s\n' "${BOARD}"
 printf 'Branch          : %s\n' "${BRANCH}"
+printf 'Armbian branch  : %s\n' "${ARMBIAN_BRANCH}"
+printf 'Kernel profile  : %s\n' "${EASEPI_R2_KERNEL_PROFILE:-default}"
 printf 'Release         : %s\n' "${RELEASE}"
 printf 'Image type      : %s\n' "${IMAGE_TYPE}"
 printf 'Kernel git      : %s\n' "${KERNEL_GIT}"
@@ -484,7 +494,7 @@ esac
 
 COMPILE_ARGS=(
     "BOARD=${BOARD}"
-    "BRANCH=${BRANCH}"
+    "BRANCH=${ARMBIAN_BRANCH}"
     "RELEASE=${RELEASE}"
     "BUILD_DESKTOP=${BUILD_DESKTOP}"
     "BUILD_MINIMAL=${BUILD_MINIMAL}"
@@ -497,6 +507,18 @@ COMPILE_ARGS=(
     "GITHUB_MIRROR=${GITHUB_MIRROR}"
     "ORAS_VERSION=${ORAS_VERSION}"
 )
+
+if [ -n "${EASEPI_R2_KERNEL_PROFILE}" ]; then
+    COMPILE_ARGS+=("EASEPI_R2_KERNEL_PROFILE=${EASEPI_R2_KERNEL_PROFILE}")
+fi
+
+if [ "${EASEPI_R2_KERNEL_PROFILE}" = "linux7" ]; then
+    COMPILE_ARGS+=(
+        "KERNEL_MAJOR_MINOR=7.0"
+        "KERNELBRANCH=branch:linux-7.0.y"
+        "KERNELPATCHDIR=archive/rockchip64-7.0"
+    )
+fi
 
 if [ -n "${REGIONAL_MIRROR}" ]; then
     COMPILE_ARGS+=("REGIONAL_MIRROR=${REGIONAL_MIRROR}")

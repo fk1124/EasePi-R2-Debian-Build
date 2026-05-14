@@ -6,9 +6,17 @@ SUDO="${SUDO:-sudo}"
 
 BOARD="${BOARD:-easepi-r2}"
 BRANCH="${BRANCH:-current}"
+ARMBIAN_BRANCH="${ARMBIAN_BRANCH:-${BRANCH}}"
 RELEASE="${RELEASE:-trixie}"
 IMAGE_TYPE="${IMAGE_TYPE:-minimal}"
 FORCE_BSP_REBUILD="${FORCE_BSP_REBUILD:-no}"
+EASEPI_R2_KERNEL_PROFILE="${EASEPI_R2_KERNEL_PROFILE:-}"
+
+if [ "${BRANCH}" = "linux7" ]; then
+    ARMBIAN_BRANCH="edge"
+    EASEPI_R2_KERNEL_PROFILE="linux7"
+fi
+export EASEPI_R2_KERNEL_PROFILE
 
 # ============================================================
 # 镜像源 / 构建策略
@@ -458,6 +466,8 @@ printf '\n[1/4] Build EasePi-R2 BSP with Armbian build framework\n'
 printf 'Build directory : %s\n' "${BUILD_DIR}"
 printf 'Board           : %s\n' "${BOARD}"
 printf 'Branch          : %s\n' "${BRANCH}"
+printf 'Armbian branch  : %s\n' "${ARMBIAN_BRANCH}"
+printf 'Kernel profile  : %s\n' "${EASEPI_R2_KERNEL_PROFILE:-default}"
 printf 'Release         : %s\n' "${RELEASE}"
 printf 'Kernel git      : %s\n' "${KERNEL_GIT}"
 printf 'Regional mirror : %s\n' "${REGIONAL_MIRROR:-none}"
@@ -489,7 +499,7 @@ mkdir -p "${TMP_BSP_DIR}"
 
 COMPILE_ARGS=(
     "BOARD=${BOARD}"
-    "BRANCH=${BRANCH}"
+    "BRANCH=${ARMBIAN_BRANCH}"
     "RELEASE=${RELEASE}"
     "BUILD_ONLY=u-boot,kernel,armbian-bsp"
     "BUILD_DESKTOP=no"
@@ -504,6 +514,18 @@ COMPILE_ARGS=(
     "GITHUB_MIRROR=${GITHUB_MIRROR}"
     "ORAS_VERSION=${ORAS_VERSION}"
 )
+
+if [ -n "${EASEPI_R2_KERNEL_PROFILE}" ]; then
+    COMPILE_ARGS+=("EASEPI_R2_KERNEL_PROFILE=${EASEPI_R2_KERNEL_PROFILE}")
+fi
+
+if [ "${EASEPI_R2_KERNEL_PROFILE}" = "linux7" ]; then
+    COMPILE_ARGS+=(
+        "KERNEL_MAJOR_MINOR=7.0"
+        "KERNELBRANCH=branch:linux-7.0.y"
+        "KERNELPATCHDIR=archive/rockchip64-7.0"
+    )
+fi
 
 if [ -n "${REGIONAL_MIRROR}" ]; then
     COMPILE_ARGS+=("REGIONAL_MIRROR=${REGIONAL_MIRROR}")

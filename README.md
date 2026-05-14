@@ -120,7 +120,7 @@ bash build-bsp-image.sh debian [系统版本] [内核分支] [镜像类型]
 ```text
 debian
 trixie / bookworm
-current / edge / vendor
+current / edge / vendor / linux7
 minimal / server
 ```
 
@@ -147,7 +147,7 @@ bash build-bsp-image.sh debian trixie current minimal
 格式解释：
 
 ```bash
-bash build.sh [current|edge|vendor] [trixie|bookworm] [minimal|server|desktop]
+bash build.sh [current|edge|vendor|linux7] [trixie|bookworm] [minimal|server|desktop]
 ```
 
 建议优先测试：
@@ -363,3 +363,33 @@ sudo dd if=output/images/EasePi-R2-debian-trixie-current-minimal.img of=/dev/sdX
 4. 再测试 edge / vendor 分支
 5. 最后再扩展 server / desktop 场景
 ```
+
+---
+
+## Linux 7.0 stable / linux7
+
+`linux7` is the dedicated EasePi-R2 build profile for the stable upstream Linux 7.0 kernel.
+
+Debian BSP images:
+
+```bash
+bash build-bsp-image.sh debian trixie linux7 minimal
+bash build-bsp-image.sh debian trixie linux7 server
+```
+
+Native Armbian images:
+
+```bash
+bash build.sh linux7 trixie minimal
+bash build.sh linux7 trixie server
+```
+
+Internally, `linux7` maps to Armbian `edge`, but pins the kernel to:
+
+```text
+KERNEL_MAJOR_MINOR=7.0
+KERNELBRANCH=branch:linux-7.0.y
+KERNELPATCHDIR=archive/rockchip64-7.0
+```
+
+This keeps Linux 7.0 separate from the normal `edge` workflow if Armbian later moves `edge` forward. GPU userspace follows the mainline `panthor` + Mesa path; Rockchip vendor `libmali` is only used by the `vendor` kernel profile.

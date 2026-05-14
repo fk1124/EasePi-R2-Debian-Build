@@ -3,10 +3,11 @@
 #  EasePi-R2 Debian BSP image builder
 #
 #  Usage:
-#    bash build-bsp-image.sh debian [trixie|bookworm] [current|edge|vendor] [minimal|server]
+#    bash build-bsp-image.sh debian [trixie|bookworm] [current|edge|vendor|linux7] [minimal|server]
 #
 #  Examples:
 #    bash build-bsp-image.sh debian trixie current minimal
+#    bash build-bsp-image.sh debian trixie linux7 minimal
 #    bash build-bsp-image.sh debian bookworm vendor server
 # ============================================================================
 
@@ -19,6 +20,8 @@ DIST="${1:-${DIST:-debian}}"
 RELEASE="${2:-${RELEASE:-trixie}}"
 BRANCH="${3:-${BRANCH:-current}}"
 IMAGE_TYPE="${4:-${IMAGE_TYPE:-minimal}}"
+ARMBIAN_BRANCH="${ARMBIAN_BRANCH:-${BRANCH}}"
+EASEPI_R2_KERNEL_PROFILE="${EASEPI_R2_KERNEL_PROFILE:-}"
 
 BOARD="${BOARD:-easepi-r2}"
 ARCH="${ARCH:-arm64}"
@@ -40,13 +43,19 @@ else
 fi
 export SUDO
 
-export DIST RELEASE BRANCH IMAGE_TYPE BOARD ARCH TARGET_HOSTNAME
+if [ "${BRANCH}" = "linux7" ]; then
+    ARMBIAN_BRANCH="edge"
+    EASEPI_R2_KERNEL_PROFILE="linux7"
+fi
+
+export DIST RELEASE BRANCH ARMBIAN_BRANCH IMAGE_TYPE BOARD ARCH TARGET_HOSTNAME
+export EASEPI_R2_KERNEL_PROFILE
 export CREATE_USER IMAGE_USER IMAGE_PASSWORD ROOT_PASSWORD LOCK_ROOT
 
 usage() {
     cat <<USAGE
 Usage:
-  bash build-bsp-image.sh debian [trixie|bookworm] [current|edge|vendor] [minimal|server]
+  bash build-bsp-image.sh debian [trixie|bookworm] [current|edge|vendor|linux7] [minimal|server]
 
 Debian releases:
   trixie      Debian 13
@@ -54,6 +63,7 @@ Debian releases:
 
 Examples:
   bash build-bsp-image.sh debian trixie current minimal
+  bash build-bsp-image.sh debian trixie linux7 minimal
   bash build-bsp-image.sh debian bookworm vendor server
 
 Optional environment variables:
@@ -94,7 +104,7 @@ case "${DIST}" in
         ;;
 esac
 
-case "${BRANCH}" in current|edge|vendor) ;; *) echo "ERROR: unsupported BRANCH: ${BRANCH}"; usage; exit 1 ;; esac
+case "${BRANCH}" in current|edge|vendor|linux7) ;; *) echo "ERROR: unsupported BRANCH: ${BRANCH}"; usage; exit 1 ;; esac
 case "${IMAGE_TYPE}" in minimal|server) ;; *) echo "ERROR: unsupported IMAGE_TYPE: ${IMAGE_TYPE}"; usage; exit 1 ;; esac
 case "${CREATE_USER}" in yes|no) ;; *) echo "ERROR: CREATE_USER only supports yes/no."; usage; exit 1 ;; esac
 case "${LOCK_ROOT}" in yes|no) ;; *) echo "ERROR: LOCK_ROOT only supports yes/no."; usage; exit 1 ;; esac
@@ -156,6 +166,8 @@ printf '============================================\n'
 printf '  DIST        = %s\n' "${DIST}"
 printf '  RELEASE     = %s\n' "${RELEASE}"
 printf '  BRANCH      = %s\n' "${BRANCH}"
+printf '  ARMBIAN     = %s\n' "${ARMBIAN_BRANCH}"
+printf '  KERNEL      = %s\n' "${EASEPI_R2_KERNEL_PROFILE:-default}"
 printf '  IMAGE_TYPE  = %s\n' "${IMAGE_TYPE}"
 printf '  BOARD       = %s\n' "${BOARD}"
 printf '  HOSTNAME    = %s\n' "${TARGET_HOSTNAME}"
