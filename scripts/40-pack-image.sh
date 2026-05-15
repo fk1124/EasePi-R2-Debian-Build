@@ -38,6 +38,36 @@ BOOT_SIZE_MB="${BOOT_SIZE_MB:-256}"
 
 BOOT_END_MIB=$((BOOT_START_MIB + BOOT_SIZE_MB))
 
+# Rockchip/Radxa vendor SPL may look for the second-stage U-Boot inside a GPT
+# partition named "uboot" before falling back to the traditional raw offset.
+# Keep current/edge/linux7 layout unchanged, but let vendor BSP images match
+# that vendor boot flow so packaging and direct BSP image flashing behave the
+# same way as the validated vendor boot chain.
+VENDOR_UBOOT_PARTITION="${VENDOR_UBOOT_PARTITION:-yes}"
+CREATE_VENDOR_UBOOT_PARTITION="no"
+UBOOT_START_MIB="${UBOOT_START_MIB:-8}"
+UBOOT_SIZE_MB="${UBOOT_SIZE_MB:-8}"
+UBOOT_END_MIB=$((UBOOT_START_MIB + UBOOT_SIZE_MB))
+
+if [ "${BRANCH}" = "vendor" ] && [ "${VENDOR_UBOOT_PARTITION}" = "yes" ]; then
+    CREATE_VENDOR_UBOOT_PARTITION="yes"
+fi
+
+BOOT_PART_NUM=1
+ROOT_PART_NUM=2
+if [ "${CREATE_VENDOR_UBOOT_PARTITION}" = "yes" ]; then
+    BOOT_PART_NUM=2
+    ROOT_PART_NUM=3
+
+    if [ "${BOOT_START_MIB}" -lt "${UBOOT_END_MIB}" ]; then
+        echo "ERROR: vendor U-Boot partition overlaps /boot."
+        echo "  uboot: ${UBOOT_START_MIB} MiB - ${UBOOT_END_MIB} MiB"
+        echo "  /boot: ${BOOT_START_MIB} MiB - ${BOOT_END_MIB} MiB"
+        echo "Set BOOT_START_MIB=${UBOOT_END_MIB} or larger."
+        exit 1
+    fi
+fi
+
 printf '\n[4/4] Pack bootable image\n'
 
 if [ ! -d "${ROOTFS_DIR}" ]; then
@@ -66,14 +96,20 @@ fi
 IMAGE_SIZE_MB="${IMAGE_SIZE_MB:-${AUTO_SIZE_MB}}"
 
 printf 'Rootfs size: %s MB\n' "${ROOTFS_MB}"
+if [ "${CREATE_VENDOR_UBOOT_PARTITION}" = "yes" ]; then
+    printf 'Vendor U-Boot partition: %s MiB - %s MiB (%s MB)\n' "${UBOOT_START_MIB}" "${UBOOT_END_MIB}" "${UBOOT_SIZE_MB}"
+fi
 printf 'Boot partition: %s MiB - %s MiB (%s MB)\n' "${BOOT_START_MIB}" "${BOOT_END_MIB}" "${BOOT_SIZE_MB}"
 printf 'Image size: %s MB\n' "${IMAGE_SIZE_MB}"
 
 truncate -s "${IMAGE_SIZE_MB}M" "${IMG}"
 
 parted -s "${IMG}" mklabel gpt
+if [ "${CREATE_VENDOR_UBOOT_PARTITION}" = "yes" ]; then
+    parted -s "${IMG}" mkpart uboot "${UBOOT_START_MIB}MiB" "${UBOOT_END_MIB}MiB"
+fi
 parted -s "${IMG}" mkpart boot fat32 "${BOOT_START_MIB}MiB" "${BOOT_END_MIB}MiB"
-parted -s "${IMG}" set 1 boot on
+parted -s "${IMG}" set "${BOOT_PART_NUM}" boot on
 parted -s "${IMG}" mkpart rootfs ext4 "${BOOT_END_MIB}MiB" 100%
 
 LOOP=""
@@ -94,12 +130,15 @@ trap cleanup EXIT
 LOOP="$(${SUDO} losetup --find --show --partscan "${IMG}")"
 sleep 1
 
-${SUDO} mkfs.vfat -F 32 -n BOOT "${LOOP}p1" >/dev/null
-${SUDO} mkfs.ext4 -F -L rootfs "${LOOP}p2" >/dev/null
+BOOT_DEV="${LOOP}p${BOOT_PART_NUM}"
+ROOT_DEV="${LOOP}p${ROOT_PART_NUM}"
+
+${SUDO} mkfs.vfat -F 32 -n BOOT "${BOOT_DEV}" >/dev/null
+${SUDO} mkfs.ext4 -F -L rootfs "${ROOT_DEV}" >/dev/null
 
 mkdir -p "${MNT_ROOT}" "${MNT_BOOT}"
-${SUDO} mount "${LOOP}p2" "${MNT_ROOT}"
-${SUDO} mount "${LOOP}p1" "${MNT_BOOT}"
+${SUDO} mount "${ROOT_DEV}" "${MNT_ROOT}"
+${SUDO} mount "${BOOT_DEV}" "${MNT_BOOT}"
 
 # --------------------------------------------------------------------
 # Copy rootfs and boot files
@@ -175,8 +214,8 @@ if [ "${BOOT_USED_MB}" -ge $((BOOT_SIZE_MB - 16)) ]; then
     exit 1
 fi
 
-BOOT_UUID="$(${SUDO} blkid -s UUID -o value "${LOOP}p1")"
-ROOT_UUID="$(${SUDO} blkid -s UUID -o value "${LOOP}p2")"
+BOOT_UUID="$(${SUDO} blkid -s UUID -o value "${BOOT_DEV}")"
+ROOT_UUID="$(${SUDO} blkid -s UUID -o value "${ROOT_DEV}")"
 
 ${SUDO} tee "${MNT_ROOT}/etc/fstab" >/dev/null <<EOF_FSTAB
 UUID=${ROOT_UUID} / ext4 defaults,noatime,commit=600,errors=remount-ro 0 1
@@ -213,7 +252,21 @@ if [ -n "${UBOOT_ROCKCHIP}" ]; then
 elif [ -n "${IDBLOADER}" ] && [ -n "${UBOOT_ITB}" ]; then
     printf 'Writing Rockchip idbloader + u-boot.itb\n'
     dd if="${IDBLOADER}" of="${IMG}" bs=512 seek=64 conv=notrunc status=none
-    dd if="${UBOOT_ITB}" of="${IMG}" bs=512 seek=16384 conv=notrunc status=none
+    if [ "${CREATE_VENDOR_UBOOT_PARTITION}" = "yes" ]; then
+        UBOOT_ITB_SEEK=$((UBOOT_START_MIB * 2048))
+        UBOOT_ITB_SIZE_BYTES="$(${SUDO} stat -c%s "${UBOOT_ITB}")"
+        UBOOT_PART_SIZE_BYTES=$((UBOOT_SIZE_MB * 1024 * 1024))
+        if [ "${UBOOT_ITB_SIZE_BYTES}" -gt "${UBOOT_PART_SIZE_BYTES}" ]; then
+            echo "ERROR: u-boot.itb is larger than the vendor uboot partition."
+            echo "  u-boot.itb: ${UBOOT_ITB_SIZE_BYTES} bytes"
+            echo "  partition : ${UBOOT_PART_SIZE_BYTES} bytes"
+            echo "Increase UBOOT_SIZE_MB before packing the image."
+            exit 1
+        fi
+    else
+        UBOOT_ITB_SEEK=16384
+    fi
+    dd if="${UBOOT_ITB}" of="${IMG}" bs=512 seek="${UBOOT_ITB_SEEK}" conv=notrunc status=none
 else
     echo "ERROR: cannot find u-boot-rockchip.bin or idbloader.img + u-boot.itb in ${UBOOT_DEB}"
     find "${TMP_DIR}/u-boot" -type f | sed 's/^/  /'
@@ -226,8 +279,8 @@ trap - EXIT
 # Shrink ext4 before compression when possible.
 set +e
 LOOP_SHRINK="$(${SUDO} losetup --find --show --partscan "${IMG}")"
-${SUDO} e2fsck -fy "${LOOP_SHRINK}p2" >/dev/null 2>&1
-${SUDO} resize2fs -M "${LOOP_SHRINK}p2" >/dev/null 2>&1
+${SUDO} e2fsck -fy "${LOOP_SHRINK}p${ROOT_PART_NUM}" >/dev/null 2>&1
+${SUDO} resize2fs -M "${LOOP_SHRINK}p${ROOT_PART_NUM}" >/dev/null 2>&1
 ${SUDO} losetup -d "${LOOP_SHRINK}" >/dev/null 2>&1
 set -e
 
