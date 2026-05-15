@@ -483,16 +483,15 @@ prepare_kernel_configs() {
         grep -q '^# CONFIG_DRM_PANEL_SIMPLE_DSI is not set' "${dst}" || \
             echo '# CONFIG_DRM_PANEL_SIMPLE_DSI is not set' >> "${dst}"
 
-        set_kernel_config_not_set "${dst}" "CONFIG_RTL8852BS"
-
         if [ "${cfg}" = "linux-rk35xx-vendor.config" ]; then
-            set_kernel_config_not_set "${dst}" "CONFIG_DRM_PANFROST"
-            set_kernel_config_not_set "${dst}" "CONFIG_DRM_PANTHOR"
-            set_kernel_config_not_set "${dst}" "CONFIG_AP6XXX"
-            set_kernel_config_not_set "${dst}" "CONFIG_BCMDHD_PCIE"
-            set_kernel_config_not_set "${dst}" "CONFIG_BCMDHD_FW_PATH"
-            set_kernel_config_not_set "${dst}" "CONFIG_BCMDHD_NVRAM_PATH"
-
+            set_kernel_config_value "${dst}" "CONFIG_R8125" "m"
+            set_kernel_config_value "${dst}" "CONFIG_RTL8852BS" "m"
+            set_kernel_config_value "${dst}" "CONFIG_DRM_PANFROST" "m"
+            set_kernel_config_value "${dst}" "CONFIG_DRM_PANTHOR" "m"
+            set_kernel_config_value "${dst}" "CONFIG_AP6XXX" "m"
+            set_kernel_config_value "${dst}" "CONFIG_BCMDHD_PCIE" "y"
+            set_kernel_config_value "${dst}" "CONFIG_BCMDHD_FW_PATH" '"/lib/firmware/ap6275p/fw_bcmdhd.bin"'
+            set_kernel_config_value "${dst}" "CONFIG_BCMDHD_NVRAM_PATH" '"/lib/firmware/ap6275p/nvram.txt"'
             set_kernel_config_value "${dst}" "CONFIG_BRCMFMAC" "m"
             set_kernel_config_value "${dst}" "CONFIG_BRCMFMAC_SDIO" "y"
             set_kernel_config_value "${dst}" "CONFIG_BT_HCIUART_BCM" "y"
@@ -505,6 +504,8 @@ prepare_kernel_configs() {
             set_kernel_config_value "${dst}" "CONFIG_MALI_PLATFORM_NAME" '"rk"'
             set_kernel_config_value "${dst}" "CONFIG_MALI_CSF_SUPPORT" "y"
             set_kernel_config_value "${dst}" "CONFIG_MALI_BIFROST_EXPERT" "y"
+        else
+            set_kernel_config_not_set "${dst}" "CONFIG_RTL8852BS"
         fi
 
         msg "Prepared kernel config: ${dst}"

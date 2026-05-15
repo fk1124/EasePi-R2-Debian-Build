@@ -99,6 +99,82 @@ iface_exists() {
   [ -e "/sys/class/net/$1" ]
 }
 
+read_board_serial() {
+  local serial=""
+  if [ -r /proc/device-tree/serial-number ]; then
+    serial="$(tr -d '\000' < /proc/device-tree/serial-number 2>/dev/null || true)"
+  fi
+  if [ -z "$serial" ] && [ -r /proc/cpuinfo ]; then
+    serial="$(awk '/^Serial[[:space:]]*:/ { print $3; exit }' /proc/cpuinfo 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$serial"
+}
+
+iface_addr_assign_type() {
+  local iface="$1"
+  [ -r "/sys/class/net/$iface/addr_assign_type" ] || return 1
+  cat "/sys/class/net/$iface/addr_assign_type" 2>/dev/null
+}
+
+iface_has_random_mac() {
+  local iface="$1" assign_type
+  assign_type="$(iface_addr_assign_type "$iface" || true)"
+  [ "$assign_type" = "1" ]
+}
+
+iface_has_global_addr() {
+  local iface="$1"
+  ip -o addr show dev "$iface" scope global 2>/dev/null | grep -q .
+}
+
+stable_mac_for_selector() {
+  local serial="$1" selector="$2" digest byte0
+  digest="$(printf '%s' "${serial:-easepi-r2}:${selector}" | sha256sum | awk '{print $1}')"
+  [ "${#digest}" -ge 12 ] || return 1
+  byte0=$(( (16#${digest:0:2} & 254) | 2 ))
+  printf '%02x:%s:%s:%s:%s:%s\n' \
+    "$byte0" \
+    "${digest:2:2}" "${digest:4:2}" "${digest:6:2}" \
+    "${digest:8:2}" "${digest:10:2}"
+}
+
+ensure_stable_mac() {
+  local iface="$1" selector="$2" serial="$3" current target
+  iface_exists "$iface" || return 1
+  iface_has_random_mac "$iface" || return 0
+  if iface_has_global_addr "$iface"; then
+    log "skip stable MAC for $iface: global address already present"
+    return 0
+  fi
+
+  target="$(stable_mac_for_selector "$serial" "$selector" || true)"
+  [ -n "$target" ] || {
+    log "skip stable MAC for $iface: failed to generate address"
+    return 1
+  }
+
+  current="$(cat "/sys/class/net/$iface/address" 2>/dev/null || true)"
+  if [ "$current" = "$target" ]; then
+    return 0
+  fi
+
+  log "assign stable MAC $target to $iface (selector $selector)"
+  ip link set dev "$iface" down 2>/dev/null || true
+  ip link set dev "$iface" address "$target"
+}
+
+apply_stable_macs() {
+  local serial i selector iface
+  serial="$(read_board_serial)"
+  [ -n "$serial" ] || serial="easepi-r2"
+
+  for i in 0 1 2 3; do
+    selector="${SELECTORS[$i]}"
+    iface="eth$i"
+    ensure_stable_mac "$iface" "$selector" "$serial" || return 1
+  done
+}
+
 unique_iface_name() {
   local base="$1" name="$1" n=0
   while iface_exists "$name"; do
@@ -350,10 +426,12 @@ main() {
   done
   if [ "$all_ok" = "1" ]; then
     log "port order already aligned; nothing to do"
+    apply_stable_macs || true
     exit 0
   fi
 
   if wait_for_all_devices && align_once; then
+    apply_stable_macs || true
     log "port order aligned successfully"
     exit 0
   fi
