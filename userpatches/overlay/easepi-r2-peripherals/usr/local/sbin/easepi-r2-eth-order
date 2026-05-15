@@ -10,9 +10,14 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 DEFAULT_ORDER="0004:40,0002:20,0001:10,0003:30"
 TMP_PREFIX="r2tmp"
 LOG_TAG="easepi-r2-eth-order"
-WAIT_TIMEOUT="${EASEPI_R2_ETH_ORDER_WAIT_TIMEOUT:-15}"
+WAIT_TIMEOUT_OVERRIDE="${EASEPI_R2_ETH_ORDER_WAIT_TIMEOUT:-}"
 WAIT_INTERVAL="${EASEPI_R2_ETH_ORDER_WAIT_INTERVAL:-1}"
+PCIE_RECOVERY_MODE="${EASEPI_R2_ETH_ORDER_PCIE_RECOVERY:-auto}"
+PCIE_RESCAN_AFTER="${EASEPI_R2_ETH_ORDER_PCIE_RESCAN_AFTER:-4}"
+PCIE_RESCAN_INTERVAL="${EASEPI_R2_ETH_ORDER_PCIE_RESCAN_INTERVAL:-4}"
+WAIT_TIMEOUT=""
 SELECTORS=()
+ARMBIAN_BRANCH=""
 
 log() {
   echo "[$LOG_TAG] $*"
@@ -26,6 +31,38 @@ read_order() {
   fi
   [ -n "$order" ] || order="$DEFAULT_ORDER"
   printf '%s\n' "$order"
+}
+
+read_armbian_release_field() {
+  local key="$1"
+  [ -r /etc/armbian-release ] || return 1
+  awk -F= -v key="$key" '$1 == key { print $2; exit }' /etc/armbian-release 2>/dev/null
+}
+
+read_armbian_branch() {
+  local branch=""
+  branch="$(read_armbian_release_field BRANCH || true)"
+  [ -n "$branch" ] || branch="unknown"
+  printf '%s\n' "$branch"
+}
+
+branch_uses_pcie_recovery() {
+  case "$PCIE_RECOVERY_MODE" in
+    yes|force|on|1|true) return 0 ;;
+    no|off|0|false) return 1 ;;
+  esac
+
+  [ "$ARMBIAN_BRANCH" != "vendor" ]
+}
+
+default_wait_timeout() {
+  if [ -n "$WAIT_TIMEOUT_OVERRIDE" ]; then
+    printf '%s\n' "$WAIT_TIMEOUT_OVERRIDE"
+  elif [ "$ARMBIAN_BRANCH" = "vendor" ]; then
+    printf '15\n'
+  else
+    printf '20\n'
+  fi
 }
 
 normalize_selector() {
@@ -200,6 +237,51 @@ settle_udev() {
   command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout="$timeout" >/dev/null 2>&1 || true
 }
 
+selector_root_port_bdf() {
+  local selector="$1"
+  printf '%s:00.0\n' "$selector"
+}
+
+selector_root_port_sysfs() {
+  local selector="$1"
+  printf '/sys/bus/pci/devices/%s\n' "$(selector_root_port_bdf "$selector")"
+}
+
+pcie_rescan_selector() {
+  local selector="$1" root dev
+  root="$(selector_root_port_bdf "$selector")"
+  dev="$(selector_root_port_sysfs "$selector")"
+
+  [ -d "$dev" ] || {
+    log "skip PCIe recovery for selector $selector: root port $root not present"
+    return 1
+  }
+
+  log "trigger PCIe recovery for missing selector $selector via root port $root"
+
+  if [ -w "$dev/reset_subordinate" ]; then
+    printf '1\n' > "$dev/reset_subordinate" 2>/dev/null || true
+  fi
+  if [ -w "$dev/rescan" ]; then
+    printf '1\n' > "$dev/rescan" 2>/dev/null || true
+  fi
+  if [ -w /sys/bus/pci/rescan ]; then
+    printf '1\n' > /sys/bus/pci/rescan 2>/dev/null || true
+  fi
+
+  settle_udev 5
+  sleep 1
+}
+
+recover_missing_selectors() {
+  local selector
+  for selector in "$@"; do
+    [ -n "$selector" ] || continue
+    iface_for_selector "$selector" >/dev/null 2>&1 && continue
+    pcie_rescan_selector "$selector" || true
+  done
+}
+
 iface_driver() {
   local iface="$1" driver
   driver="$(readlink -f "/sys/class/net/$iface/device/driver" 2>/dev/null || true)"
@@ -319,8 +401,10 @@ report_alignment() {
 }
 
 wait_for_all_devices() {
-  local deadline missing i selector cur
+  local deadline start_time next_recovery_at missing i selector cur
   deadline=$((SECONDS + WAIT_TIMEOUT))
+  start_time=$SECONDS
+  next_recovery_at=$((start_time + PCIE_RESCAN_AFTER))
 
   while :; do
     missing=""
@@ -333,6 +417,23 @@ wait_for_all_devices() {
     if [ -z "$missing" ]; then
       log "all target RTL8125 interfaces are present"
       return 0
+    fi
+
+    if branch_uses_pcie_recovery && [ "$SECONDS" -ge "$next_recovery_at" ]; then
+      log "missing selectors still present after $((SECONDS - start_time))s; try targeted PCIe recovery: $missing"
+      # shellcheck disable=SC2086
+      recover_missing_selectors $missing
+      next_recovery_at=$((SECONDS + PCIE_RESCAN_INTERVAL))
+      missing=""
+      for i in 0 1 2 3; do
+        selector="${SELECTORS[$i]}"
+        cur="$(iface_for_selector "$selector" || true)"
+        [ -n "$cur" ] || missing="${missing}${missing:+ }$selector"
+      done
+      if [ -z "$missing" ]; then
+        log "all target RTL8125 interfaces are present after PCIe recovery"
+        return 0
+      fi
     fi
 
     if [ "$SECONDS" -ge "$deadline" ]; then
@@ -403,7 +504,10 @@ main() {
   fi
 
   local order i selector all_ok=1
+  ARMBIAN_BRANCH="$(read_armbian_branch)"
+  WAIT_TIMEOUT="$(default_wait_timeout)"
   order="$(read_order)"
+  log "branch=$ARMBIAN_BRANCH wait_timeout=${WAIT_TIMEOUT}s pcie_recovery=$(branch_uses_pcie_recovery && printf yes || printf no)"
   log "eth_order=$order"
 
   IFS=',' read -r -a SELECTORS <<< "$order"
