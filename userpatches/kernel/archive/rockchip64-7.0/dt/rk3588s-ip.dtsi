@@ -25,5 +25,4 @@
 
 #include "rk3588s-vpu.dtsi"
 #include "rk3588s-gpu.dtsi"
-#include "rk3588s-npu.dtsi"
 #include "rk3588s-crypto.dtsi"
